@@ -45,6 +45,7 @@ use mimalloc as _;
 mod audio;
 pub(crate) mod commands;
 pub(crate) mod logging;
+mod media;
 pub mod platform;
 mod state;
 #[cfg(not(target_os = "android"))]
@@ -259,6 +260,15 @@ pub fn run() {
     #[cfg(feature = "dhat-heap")]
     if let Ok(mut guard) = DHAT_PROFILER.lock() {
         *guard = Some(dhat::Profiler::new_heap());
+    }
+
+    // Encoder probing re-runs this executable with a hidden flag and reads
+    // one JSON object off its stdout.  This has to come before
+    // single-instance handling, which would otherwise forward the flag to
+    // the running app as if it were a deep link and exit without printing
+    // anything.
+    if media::encoder::handle_probe_cli() {
+        return;
     }
 
     let _ = rustls::crypto::ring::default_provider().install_default();
@@ -808,6 +818,10 @@ macro_rules! all_command_handlers {
             commands::draw_overlay::close_drawing_overlay,
             commands::draw_overlay::take_drawing_overlay_context,
             commands::window::set_window_aspect_ratio,
+            commands::screen_share::list_video_encoders,
+            commands::screen_share::default_screen_share_settings,
+            commands::screen_share::suggested_screen_share_bitrate,
+            commands::screen_share::resolve_screen_share_encoding,
             #[cfg(not(target_os = "android"))]
             updater::commands::updater_check,
             #[cfg(not(target_os = "android"))]

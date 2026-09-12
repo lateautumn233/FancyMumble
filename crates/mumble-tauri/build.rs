@@ -115,6 +115,46 @@ fn main() {
         println!("cargo:rustc-link-lib=delayimp");
         println!("cargo:rustc-link-arg=/DELAYLOAD:comctl32.dll");
     }
+
+    if target_os == "windows" {
+        link_ffmpeg_system_libs();
+    }
+}
+
+/// Link the Windows system libraries that the vcpkg `FFmpeg` static build
+/// needs but `ffmpeg-sys-next` does not emit.
+///
+/// That crate's build script prints a fixed, hard-coded list of system
+/// libraries which predates several `FFmpeg` components enabled by the vcpkg
+/// port: Media Foundation (`h264_mf`) needs the `mfuuid` / `strmiids` IID
+/// libraries, the schannel TLS backend needs `ncrypt` / `crypt32`, and
+/// libvpl (QSV) reads the registry via `advapi32`.  Without these the link
+/// fails with `LNK2001: unresolved external symbol`.
+///
+/// Only emitted when the `native-screenshare` feature is on, so default
+/// builds are unaffected.
+fn link_ffmpeg_system_libs() {
+    if std::env::var_os("CARGO_FEATURE_NATIVE_SCREENSHARE").is_none() {
+        return;
+    }
+
+    for lib in [
+        "mfuuid",
+        "strmiids",
+        "mfplat",
+        "mf",
+        "ncrypt",
+        "crypt32",
+        "advapi32",
+        "ole32",
+        "user32",
+        "bcrypt",
+        "secur32",
+        "ws2_32",
+        "shlwapi",
+    ] {
+        println!("cargo:rustc-link-lib={lib}");
+    }
 }
 
 /// Build the signal-bridge cdylib from its separate workspace and copy

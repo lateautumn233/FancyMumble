@@ -31,6 +31,13 @@ devtools = ["tauri/devtools"]
 # https://nnethercote.github.io/dh_view/dh_view.html). Mutually exclusive
 # with mimalloc at runtime; the dhat allocator takes priority when enabled.
 dhat-heap = ["dep:dhat"]
+# Native screen-share capture and hardware video encoding (Windows only).
+#
+# Pulls in `ffmpeg-sys-next`, which on MSVC locates FFmpeg through the
+# `vcpkg` crate and needs `libclang.dll` at build time (see `TODO.md` 0.3).
+# CI runners have neither, so this stays OFF by default and the encoder
+# commands report `supported: false` in builds without it.
+native-screenshare = ["dep:ffmpeg-sys-next", "dep:windows"]
 
 [dependencies]
 fancy-utils = { path = "../fancy-utils" }
@@ -99,6 +106,26 @@ windows-sys = { version = "0.61", features = [
 # tauri/wry pull in so the COM interface types are identical.
 webview2-com = "0.38"
 windows-core = "0.61"
+
+# --- `native-screenshare` feature only (Windows) ----------------------
+#
+# FFmpeg FFI for hardware video encoding. Version must track the FFmpeg
+# major.minor installed via vcpkg (currently 8.1.2), see `TODO.md` 0.3.
+ffmpeg-sys-next = { version = "8.1", default-features = false, features = [
+    "avcodec",
+    "avformat",
+    "avfilter",
+    "swscale",
+    "swresample",
+    "static",
+], optional = true }
+# DXGI adapter enumeration for the encoder-cache GPU signature. Already in
+# the tree via cpal; we only turn on the Direct3D/DXGI feature sets.
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+], optional = true }
 
 # macOS-only: NSWindow.setContentAspectRatio: for native aspect-ratio
 # constraints (see crates/mumble-tauri/src/platform/window/macos.rs).

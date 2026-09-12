@@ -24,6 +24,7 @@ pub(crate) mod plugin_info;
 pub(crate) mod profile;
 pub(crate) mod public_servers;
 pub(crate) mod realtime;
+pub(crate) mod screen_share;
 pub(crate) mod server;
 pub(crate) mod servers;
 pub(crate) mod system;
