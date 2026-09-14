@@ -237,6 +237,40 @@ pub(crate) fn suggested_bitrate_kbps(size: OutputSize, fps: u32) -> u32 {
 /// Default frame rate: a compromise between smoothness and bit rate.
 const DEFAULT_FPS: u32 = 30;
 
+/// Highest number of direct viewers the settings UI allows.
+///
+/// Each one costs a full copy of the stream on the broadcaster's uplink, so
+/// this is a bandwidth ceiling rather than a technical limit.
+pub(crate) const MAX_P2P_VIEWERS: u32 = 8;
+
+/// How many viewers get a direct connection by default.
+///
+/// Two keeps the uplink cost modest while covering the common case of one or
+/// two people watching, where avoiding the server round trip is most
+/// noticeable.
+const DEFAULT_P2P_MAX_VIEWERS: u32 = 2;
+
+/// How a broadcast reaches its viewers.
+///
+/// The two transports coexist within one broadcast: the first
+/// [`ScreenShareSettings::p2p_max_viewers`] viewers are offered a direct
+/// connection and everyone after that goes through the server's SFU.  The
+/// encoder runs once either way - the pipeline's frame sink fans out - so the
+/// cost of a direct viewer is uplink bandwidth, not CPU.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum P2pMode {
+    /// Offer direct connections up to the viewer cap, then fall back to the
+    /// SFU.  Also falls back for any viewer whose direct connection cannot be
+    /// established - without a TURN server, a symmetric NAT on either side
+    /// defeats it.
+    #[default]
+    Auto,
+    /// Never offer a direct connection; every viewer goes through the SFU.
+    /// Broadcaster uplink is then O(1) regardless of audience size.
+    Disabled,
+}
+
 /// The complete set of user-configurable screen-share encoding settings.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -252,6 +286,14 @@ pub(crate) struct ScreenShareSettings {
     /// Target bit rate in kbps.  `None` means derive it from the resolved
     /// resolution and frame rate via [`suggested_bitrate_kbps`].
     pub(crate) bitrate_kbps: Option<u32>,
+    /// How a broadcast reaches its viewers.  See [`P2pMode`].
+    pub(crate) p2p: P2pMode,
+    /// How many viewers, at most, are offered a direct connection.
+    ///
+    /// Only consulted when [`Self::p2p`] is [`P2pMode::Auto`].  Capped at
+    /// [`MAX_P2P_VIEWERS`].  A value of 0 is equivalent to
+    /// [`P2pMode::Disabled`].
+    pub(crate) p2p_max_viewers: u32,
 }
 
 impl Default for ScreenShareSettings {
@@ -262,6 +304,8 @@ impl Default for ScreenShareSettings {
             resolution: Resolution::default(),
             fps: DEFAULT_FPS,
             bitrate_kbps: None,
+            p2p: P2pMode::default(),
+            p2p_max_viewers: DEFAULT_P2P_MAX_VIEWERS,
         }
     }
 }
@@ -299,7 +343,26 @@ impl ScreenShareSettings {
                 ));
             }
         }
+        if self.p2p_max_viewers > MAX_P2P_VIEWERS {
+            return Err(format!(
+                "p2p viewer cap {} is above {MAX_P2P_VIEWERS}",
+                self.p2p_max_viewers
+            ));
+        }
         self.resolution.validate()
+    }
+
+    /// How many viewers may be given a direct connection.
+    ///
+    /// Collapses the two ways of saying "none" - [`P2pMode::Disabled`] and a
+    /// cap of zero - so callers have a single number to reason about.  The
+    /// server's own support is a separate condition and is checked where the
+    /// signalling happens.
+    pub(crate) fn p2p_slots(&self) -> u32 {
+        match self.p2p {
+            P2pMode::Disabled => 0,
+            P2pMode::Auto => self.p2p_max_viewers.min(MAX_P2P_VIEWERS),
+        }
     }
 
     /// Validate, then resolve against the capture source's own size.
@@ -438,6 +501,29 @@ mod tests {
         assert!(json.contains("\"bitrateKbps\""), "{json}");
         assert!(json.contains("\"capture\":\"ddagrab\""), "{json}");
         assert!(json.contains("\"mode\":\"native\""), "{json}");
+    }
+
+    #[test]
+    fn p2p_slots_collapses_every_way_of_saying_none() {
+        let auto = ScreenShareSettings {
+            p2p: P2pMode::Auto,
+            p2p_max_viewers: 3,
+            ..Default::default()
+        };
+        assert_eq!(auto.p2p_slots(), 3);
+
+        // Disabled wins over whatever the cap says.
+        let disabled = ScreenShareSettings { p2p: P2pMode::Disabled, ..auto.clone() };
+        assert_eq!(disabled.p2p_slots(), 0);
+
+        // A cap of zero means the same thing as disabling it.
+        let zero = ScreenShareSettings { p2p_max_viewers: 0, ..auto.clone() };
+        assert_eq!(zero.p2p_slots(), 0);
+
+        // Stored settings from a future build with a higher ceiling must not
+        // hand out more slots than this build is prepared to serve.
+        let over = ScreenShareSettings { p2p_max_viewers: 999, ..auto };
+        assert_eq!(over.p2p_slots(), MAX_P2P_VIEWERS);
     }
 
     #[test]

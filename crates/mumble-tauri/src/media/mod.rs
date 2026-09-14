@@ -27,8 +27,15 @@
 //! capture (`cpal` is already a dependency) and somewhere to put the result,
 //! which is the transport stage's business.
 
+#[cfg(not(target_os = "android"))]
+pub(crate) mod broadcast;
+#[cfg(not(target_os = "android"))]
+pub(crate) mod connection;
 pub(crate) mod encoder;
+#[cfg(not(target_os = "android"))]
+pub(crate) mod frame;
 pub(crate) mod settings;
+pub(crate) mod transport;
 
 /// What to capture, and the filter chain that encodes it.
 #[cfg(all(target_os = "windows", feature = "native-screenshare"))]

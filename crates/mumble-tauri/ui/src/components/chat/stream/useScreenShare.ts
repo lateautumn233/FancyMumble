@@ -48,6 +48,30 @@ const SIGNAL_STOP = 1;
 const SIGNAL_SDP_OFFER = 2;
 const SIGNAL_SDP_ANSWER = 3;
 const SIGNAL_ICE_CANDIDATE = 4;
+const SIGNAL_P2P_OFFER = 5;
+const SIGNAL_P2P_ANSWER = 6;
+const SIGNAL_P2P_ICE = 7;
+const SIGNAL_P2P_REQUEST = 8;
+const SIGNAL_P2P_DECLINE = 9;
+const SIGNAL_P2P_LEAVE = 10;
+
+interface BroadcastTransport { p2p: boolean; sfuAvailable: boolean }
+const broadcastTransports = new Map<string, BroadcastTransport>();
+const broadcastKey = (session: number, serverId: string | null) => JSON.stringify([serverId, session]);
+
+function rememberTransport(session: number, serverId: string | null, payload: string): void {
+  try {
+    const value: unknown = JSON.parse(payload);
+    if (value && typeof value === "object" && "native" in value && value.native === true) {
+      broadcastTransports.set(broadcastKey(session, serverId), {
+        p2p: "p2p" in value && value.p2p === true,
+        sfuAvailable: "sfuAvailable" in value && value.sfuAvailable === true,
+      });
+      return;
+    }
+  } catch { /* Legacy broadcasters announce with an empty payload. */ }
+  broadcastTransports.delete(broadcastKey(session, serverId));
+}
 
 // STUN servers for the client to discover its public address.
 // The server SFU uses ICE-lite and needs no STUN.
@@ -326,6 +350,9 @@ interface ViewerState {
   stream: MediaStream | null;
   /** ServerId of the connection that owns this viewer PC. */
   serverId: string | null;
+  transport: "pending" | "direct" | "sfu";
+  sfuAvailable: boolean;
+  timeout: ReturnType<typeof setTimeout> | null;
 }
 
 const viewerPcs = new Map<number, ViewerState>();
@@ -351,15 +378,16 @@ function flushViewerIce(session: number): void {
 
 function closeViewer(session?: number): void {
   if (session === undefined) {
-    for (const [sess, state] of viewerPcs) {
-      state.pc.close();
-      notifyStreamListeners(sess, null);
+    for (const [sess] of viewerPcs) {
+      closeViewer(sess);
     }
     viewerPcs.clear();
     return;
   }
   const state = viewerPcs.get(session);
   if (state) {
+    if (state.timeout !== null) clearTimeout(state.timeout);
+    if (state.transport !== "sfu") sendSignal(session, SIGNAL_P2P_LEAVE, "", state.serverId);
     state.pc.close();
     viewerPcs.delete(session);
     notifyStreamListeners(session, null);
@@ -367,7 +395,7 @@ function closeViewer(session?: number): void {
 }
 
 /** Connect to the server SFU to watch a broadcaster's stream. Returns immediately if already connected. */
-async function startWatching(broadcasterSession: number): Promise<void> {
+async function startWatching(broadcasterSession: number, forceSfu = false, pinnedServerId?: string | null): Promise<void> {
   if (viewerPcs.has(broadcasterSession)) return;
 
   closePreview();
@@ -376,18 +404,28 @@ async function startWatching(broadcasterSession: number): Promise<void> {
   // trickling ICE candidates and SDP offers always travel through the
   // connection that owns the peer connection - even after the user
   // switches to another server tab.
-  const sid = useAppStore.getState().activeServerId;
+  const sid = pinnedServerId === undefined ? useAppStore.getState().activeServerId : pinnedServerId;
+  const announced = broadcastTransports.get(broadcastKey(broadcasterSession, sid));
+  const config = useAppStore.getState().serverConfig;
+  const direct = !forceSfu && announced?.p2p === true && config.webrtc_p2p_relay_available === true;
 
   const pc = new RTCPeerConnection(RTC_CONFIG);
-  const state: ViewerState = { pc, pendingIce: [], stream: null, serverId: sid };
+  const state: ViewerState = {
+    pc, pendingIce: [], stream: null, serverId: sid,
+    transport: direct ? "pending" : "sfu",
+    sfuAvailable: announced?.sfuAvailable ?? config.webrtc_sfu_available,
+    timeout: null,
+  };
   viewerPcs.set(broadcasterSession, state);
 
-  pc.addTransceiver("video", { direction: "recvonly" });
-  pc.addTransceiver("audio", { direction: "recvonly" });
+  if (!direct) {
+    pc.addTransceiver("video", { direction: "recvonly" });
+    pc.addTransceiver("audio", { direction: "recvonly" });
+  }
 
   pc.ontrack = (e) => {
     const s = viewerPcs.get(broadcasterSession);
-    if (!s) return;
+    if (!s || s.pc !== pc) return;
     s.stream ??= new MediaStream();
     if (!s.stream.getTrackById(e.track.id)) {
       s.stream.addTrack(e.track);
@@ -398,13 +436,18 @@ async function startWatching(broadcasterSession: number): Promise<void> {
   // Send our ICE candidates to the server (routed via broadcaster session).
   pc.onicecandidate = (e) => {
     if (e.candidate) {
-      sendSignal(broadcasterSession, SIGNAL_ICE_CANDIDATE, JSON.stringify(e.candidate.toJSON()), sid);
+      sendSignal(broadcasterSession, state.transport === "sfu" ? SIGNAL_ICE_CANDIDATE : SIGNAL_P2P_ICE, JSON.stringify(e.candidate.toJSON()), sid);
     }
   };
 
   pc.onconnectionstatechange = () => {
     if (viewerPcs.get(broadcasterSession)?.pc !== pc) return; // stale closure
+    if (pc.connectionState === "connected" && state.timeout !== null) {
+      clearTimeout(state.timeout);
+      state.timeout = null;
+    }
     if (pc.connectionState === "failed" || pc.connectionState === "disconnected") {
+      if (state.transport !== "sfu") { fallbackViewer(broadcasterSession, state); return; }
       closeViewer(broadcasterSession);
       const { watchingSession } = useAppStore.getState();
       if (watchingSession === broadcasterSession) {
@@ -412,6 +455,15 @@ async function startWatching(broadcasterSession: number): Promise<void> {
       }
     }
   };
+
+  state.timeout = setTimeout(() => {
+    if (viewerPcs.get(broadcasterSession) !== state) return;
+    fallbackViewer(broadcasterSession, state);
+  }, 20_000);
+  if (direct) {
+    sendSignal(broadcasterSession, SIGNAL_P2P_REQUEST, "", sid);
+    return;
+  }
 
   const offer = await pc.createOffer();
   if (viewerPcs.get(broadcasterSession)?.pc !== pc) return; // replaced while awaiting
@@ -421,6 +473,31 @@ async function startWatching(broadcasterSession: number): Promise<void> {
   // Send offer to server, targeting the broadcaster session.
   // The server intercepts this and creates an SFU outbound peer.
   sendSignal(broadcasterSession, SIGNAL_SDP_OFFER, offer.sdp!, sid);
+}
+
+function fallbackViewer(session: number, state: ViewerState): void {
+  if (viewerPcs.get(session) !== state) return;
+  closeViewer(session);
+  if (state.transport !== "sfu" && state.sfuAvailable) {
+    startWatching(session, true, state.serverId).catch((error) => showWebRtcError(String(error)));
+  } else if (useAppStore.getState().activeServerId === state.serverId) {
+    showWebRtcError(state.sfuAvailable ? "Screen sharing connection failed." : "Direct screen sharing failed and this server has no SFU fallback.");
+    useAppStore.setState({ watchingSession: null, watchingOwnSession: null });
+  }
+}
+
+async function acceptDirectOffer(session: number, state: ViewerState, sdp: string): Promise<void> {
+  if (state.transport !== "pending") return;
+  state.transport = "direct";
+  try {
+    await state.pc.setRemoteDescription({ type: "offer", sdp });
+    if (viewerPcs.get(session) !== state) return;
+    flushViewerIce(session);
+    const answer = await state.pc.createAnswer();
+    if (viewerPcs.get(session) !== state) return;
+    await state.pc.setLocalDescription(answer);
+    if (viewerPcs.get(session) === state) sendSignal(session, SIGNAL_P2P_ANSWER, answer.sdp!, state.serverId);
+  } catch { fallbackViewer(session, state); }
 }
 
 /** Handle an SDP answer from the server SFU. */
@@ -433,11 +510,11 @@ async function handleServerAnswer(pc: RTCPeerConnection, sdp: string): Promise<v
 // ---------------------------------------------------------------------------
 
 /** Route an SDP answer to the peer that is waiting for one. */
-function routeSdpAnswer(senderSession: number, payload: string): void {
+function routeSdpAnswer(senderSession: number, payload: string, serverId: string | null): void {
   // Viewer PCs are keyed by the broadcaster's session, so if we are
   // watching `senderSession` the answer is for that viewer PC.
   const viewerState = viewerPcs.get(senderSession);
-  if (viewerState?.pc.signalingState === "have-local-offer") {
+  if (viewerState?.serverId === serverId && viewerState.transport === "sfu" && viewerState.pc.signalingState === "have-local-offer") {
     handleServerAnswer(viewerState.pc, payload)
       .then(() => flushViewerIce(senderSession))
       .catch((e) => console.error("[sfu] viewer setRemoteDescription error:", e));
@@ -451,7 +528,7 @@ function routeSdpAnswer(senderSession: number, payload: string): void {
   // `startSharing` may not have flushed by then), and any answer that
   // is not for a known viewer must be for our broadcaster - the SFU
   // never sends unsolicited answers.
-  if (broadcasterPc?.signalingState === "have-local-offer") {
+  if (broadcasterServerId === serverId && broadcasterPc?.signalingState === "have-local-offer") {
     broadcasterAwaitingAnswer = null;
     handleServerAnswer(broadcasterPc, payload)
       .then(flushBroadcasterIce)
@@ -459,7 +536,7 @@ function routeSdpAnswer(senderSession: number, payload: string): void {
     return;
   }
 
-  if (getPreviewPc()?.signalingState === "have-local-offer") {
+  if (serverId === useAppStore.getState().activeServerId && getPreviewPc()?.signalingState === "have-local-offer") {
     handlePreviewAnswer(payload);
     return;
   }
@@ -482,7 +559,7 @@ function routeSdpAnswer(senderSession: number, payload: string): void {
 }
 
 /** Route an ICE candidate to the correct peer (broadcaster > viewer by sender session > preview). */
-function routeIceCandidate(senderSession: number, payload: string): void {
+function routeIceCandidate(senderSession: number, payload: string, serverId: string | null): void {
   let candidate: RTCIceCandidateInit | null = null;
   try {
     candidate = JSON.parse(payload) as RTCIceCandidateInit;
@@ -491,7 +568,7 @@ function routeIceCandidate(senderSession: number, payload: string): void {
   }
   if (!candidate) return;
 
-  if (broadcasterPc) {
+  if (broadcasterServerId === serverId && broadcasterPc && senderSession === useAppStore.getState().broadcastingOwnSession) {
     console.log(
       `[sfu] broadcaster remote ICE candidate (queued=${!broadcasterPc.remoteDescription}): ${candidate.candidate ?? "<end>"}`,
     );
@@ -504,7 +581,7 @@ function routeIceCandidate(senderSession: number, payload: string): void {
   }
 
   const viewerState = viewerPcs.get(senderSession);
-  if (viewerState) {
+  if (viewerState?.serverId === serverId && viewerState.transport === "sfu") {
     if (viewerState.pc.remoteDescription) {
       viewerState.pc.addIceCandidate(candidate).catch(console.error);
     } else {
@@ -513,12 +590,30 @@ function routeIceCandidate(senderSession: number, payload: string): void {
     return;
   }
 
-  if (getPreviewPc()) {
+  if (serverId === useAppStore.getState().activeServerId && getPreviewPc()) {
     handlePreviewIceCandidate(candidate);
   }
 }
 
-function handleSignal(senderSession: number, _targetSession: number | null, signalType: number, payload: string): void {
+function handleSignal(senderSession: number, _targetSession: number | null, signalType: number, payload: string, serverId: string | null): void {
+  const viewer = viewerPcs.get(senderSession);
+  if (signalType === SIGNAL_START) rememberTransport(senderSession, serverId, payload);
+  if (signalType === SIGNAL_STOP) broadcastTransports.delete(broadcastKey(senderSession, serverId));
+  if (signalType >= SIGNAL_P2P_OFFER) {
+    if (!viewer || viewer.serverId !== serverId || viewer.transport === "sfu") return;
+    if (signalType === SIGNAL_P2P_OFFER) void acceptDirectOffer(senderSession, viewer, payload);
+    if (signalType === SIGNAL_P2P_DECLINE) fallbackViewer(senderSession, viewer);
+    if (signalType === SIGNAL_P2P_ICE) {
+      try {
+        const candidate = JSON.parse(payload) as RTCIceCandidateInit;
+        if (viewer.pc.remoteDescription) void viewer.pc.addIceCandidate(candidate).catch(() => fallbackViewer(senderSession, viewer));
+        else if (viewer.pendingIce.length < 64) viewer.pendingIce.push(candidate);
+      } catch { fallbackViewer(senderSession, viewer); }
+    }
+    return;
+  }
+  if (serverId !== useAppStore.getState().activeServerId
+      && serverId !== broadcasterServerId && serverId !== viewer?.serverId) return;
   // The Mumble server only forwards PluginData to the explicit
   // `receiver_sessions` list, so any signal we receive is already
   // intended for one of *our* connections.  We must NOT filter by
@@ -531,6 +626,7 @@ function handleSignal(senderSession: number, _targetSession: number | null, sign
 
   switch (signalType) {
     case SIGNAL_START:
+      if (serverId !== useAppStore.getState().activeServerId) return;
       useAppStore.setState((s) => {
         const next = new Set(s.broadcastingSessions);
         next.add(senderSession);
@@ -539,6 +635,10 @@ function handleSignal(senderSession: number, _targetSession: number | null, sign
       break;
 
     case SIGNAL_STOP:
+      if (serverId !== useAppStore.getState().activeServerId) {
+        if (viewer?.serverId === serverId) closeViewer(senderSession);
+        return;
+      }
       useAppStore.setState((s) => {
         const next = new Set(s.broadcastingSessions);
         next.delete(senderSession);
@@ -562,11 +662,11 @@ function handleSignal(senderSession: number, _targetSession: number | null, sign
       break;
 
     case SIGNAL_SDP_ANSWER:
-      routeSdpAnswer(senderSession, payload);
+      routeSdpAnswer(senderSession, payload, serverId);
       break;
 
     case SIGNAL_ICE_CANDIDATE:
-      routeIceCandidate(senderSession, payload);
+      routeIceCandidate(senderSession, payload, serverId);
       break;
 
     default:
@@ -632,9 +732,9 @@ export function useScreenShare(): ScreenShareHook {
 
   // Register the WebRTC signal handler for screen share signaling.
   useEffect(() => {
-    const unregister = onWebRtcSignal((senderSession, targetSession, signalType, payload) => {
+    const unregister = onWebRtcSignal((senderSession, targetSession, signalType, payload, serverId) => {
       if (senderSession === null) return;
-      handleSignal(senderSession, targetSession, signalType, payload);
+      handleSignal(senderSession, targetSession, signalType, payload, serverId);
     });
     return unregister;
   }, []);

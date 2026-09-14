@@ -1121,6 +1121,18 @@ pub struct ServerConfig {
     /// unset means "no override; use whatever the plugin advertises".
     #[prost(string, optional, tag = "9")]
     pub fancy_rest_api_url: ::core::option::Option<::prost::alloc::string::String>,
+    /// True when the server relays the P2P_* WebRtcSignal types between
+    /// clients instead of feeding them to its SFU.
+    ///
+    /// Peer-to-peer screen sharing needs this: a server with an SFU loaded
+    /// intercepts SDP_OFFER and ICE_CANDIDATE and drops SDP_ANSWER, so
+    /// direct connections cannot be negotiated over the existing signal
+    /// types. Absent or false means "do not attempt P2P" - not just
+    /// because it would fail, but because proto2 maps the unknown P2P_*
+    /// values onto START, which the server would answer by creating an
+    /// SFU session and broadcasting to the channel.
+    #[prost(bool, optional, tag = "10")]
+    pub webrtc_p2p_relay_available: ::core::option::Option<bool>,
 }
 /// Sent by the server to inform the clients of suggested client configuration
 /// specified by the server administrator.
@@ -1721,6 +1733,22 @@ pub mod web_rtc_signal {
         SdpOffer = 2,
         SdpAnswer = 3,
         IceCandidate = 4,
+        /// Broadcaster offers a direct connection to one viewer. The
+        /// broadcaster initiates, because only it knows how many P2P slots
+        /// are left.
+        P2pOffer = 5,
+        /// Viewer's answer to a P2P_OFFER.
+        P2pAnswer = 6,
+        /// ICE candidate for a P2P connection, in either direction.
+        P2pIce = 7,
+        /// Viewer asks to watch, so the broadcaster can decide between a
+        /// direct connection and the SFU. Carries no payload.
+        P2pRequest = 8,
+        /// Broadcaster declines a P2P_REQUEST: no slots left, or P2P is
+        /// disabled. The viewer falls back to the SFU.
+        P2pDecline = 9,
+        /// Viewer stopped watching; release its direct connection and slot.
+        P2pLeave = 10,
     }
     impl SignalType {
         /// String value of the enum field names used in the ProtoBuf definition.
@@ -1734,6 +1762,12 @@ pub mod web_rtc_signal {
                 Self::SdpOffer => "SDP_OFFER",
                 Self::SdpAnswer => "SDP_ANSWER",
                 Self::IceCandidate => "ICE_CANDIDATE",
+                Self::P2pOffer => "P2P_OFFER",
+                Self::P2pAnswer => "P2P_ANSWER",
+                Self::P2pIce => "P2P_ICE",
+                Self::P2pRequest => "P2P_REQUEST",
+                Self::P2pDecline => "P2P_DECLINE",
+                Self::P2pLeave => "P2P_LEAVE",
             }
         }
         /// Creates an enum from field names used in the ProtoBuf definition.
@@ -1744,6 +1778,12 @@ pub mod web_rtc_signal {
                 "SDP_OFFER" => Some(Self::SdpOffer),
                 "SDP_ANSWER" => Some(Self::SdpAnswer),
                 "ICE_CANDIDATE" => Some(Self::IceCandidate),
+                "P2P_OFFER" => Some(Self::P2pOffer),
+                "P2P_ANSWER" => Some(Self::P2pAnswer),
+                "P2P_ICE" => Some(Self::P2pIce),
+                "P2P_REQUEST" => Some(Self::P2pRequest),
+                "P2P_DECLINE" => Some(Self::P2pDecline),
+                "P2P_LEAVE" => Some(Self::P2pLeave),
                 _ => None,
             }
         }

@@ -29,9 +29,14 @@ impl AppState {
     }
 
     pub async fn join_channel(&self, channel_id: u32, password: Option<String>) -> Result<(), String> {
+        let session = self.inner.snapshot();
+        #[cfg(not(target_os = "android"))]
+        {
+            let changing = session.lock().map_err(|e| e.to_string())?.current_channel != Some(channel_id);
+            if changing { super::screen_share::stop_on(&session).await?; }
+        }
         let handle = {
-            let __session = self.inner.snapshot();
-            let state = __session.lock().map_err(|e| e.to_string())?;
+            let state = session.lock().map_err(|e| e.to_string())?;
             state.conn.client_handle.clone()
         };
 

@@ -280,6 +280,15 @@ pub struct ServerConfig {
     pub max_image_message_length: u32,
     pub allow_html: bool,
     pub webrtc_sfu_available: bool,
+    /// Whether the server relays the `P2P_*` screen-share signal types
+    /// between clients instead of feeding them to its SFU.
+    ///
+    /// Gates peer-to-peer screen sharing entirely.  A server without this
+    /// support intercepts the SFU signal types and, because proto2 maps an
+    /// unknown enum value onto the default, would read a `P2P_*` signal as
+    /// `START` and broadcast an unwanted SFU session to the channel - so
+    /// this must be checked before sending one, not merely hoped for.
+    pub webrtc_p2p_relay_available: bool,
     /// Optional override for the Fancy Mumble REST API base URL,
     /// advertised by the server in `ServerConfig::fancy_rest_api_url`.
     /// `None` (or empty) means clients should fall back to whatever the
@@ -296,6 +305,7 @@ impl Default for ServerConfig {
             max_image_message_length: 131072,
             allow_html: true,
             webrtc_sfu_available: false,
+            webrtc_p2p_relay_available: false,
             fancy_rest_api_url: None,
         }
     }

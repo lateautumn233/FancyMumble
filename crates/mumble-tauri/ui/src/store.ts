@@ -945,6 +945,7 @@ const INITIAL: Pick<
     max_image_message_length: 131072,
     allow_html: true,
     webrtc_sfu_available: false,
+    webrtc_p2p_relay_available: false,
     fancy_rest_api_url: null,
   },
   fileServerConfig: null,

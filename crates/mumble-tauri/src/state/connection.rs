@@ -149,6 +149,9 @@ impl AppState {
             .ok_or_else(|| format!("unknown server id: {id}"))?;
         let is_active = self.registry.active_id() == Some(id);
 
+        #[cfg(not(target_os = "android"))]
+        super::screen_share::stop_on(&arc).await?;
+
         if is_active {
             // Stop audio for the session being torn down (== current inner).
             self.stop_audio_on(&arc);

@@ -11,6 +11,52 @@
 
 use crate::media::encoder::{self, EncoderReport, Selection};
 use crate::media::settings::{OutputSize, ResolvedEncoding, ScreenShareSettings};
+use crate::media::transport::{Allocator, SfuReason};
+
+/// Start native capture and WebRTC transport on the selected server.
+#[tauri::command]
+pub(crate) async fn start_native_screen_share(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, crate::state::AppState>,
+    request: serde_json::Value,
+    server_id: Option<String>,
+) -> Result<serde_json::Value, String> {
+    #[cfg(not(target_os = "android"))]
+    {
+        let request = serde_json::from_value(request).map_err(|e| format!("invalid screen-share request: {e}"))?;
+        let status = state.start_native_screen_share(app, request, server_id).await?;
+        serde_json::to_value(status).map_err(|e| e.to_string())
+    }
+    #[cfg(target_os = "android")]
+    {
+        let _ = (app, state, request, server_id);
+        Err("native screen sharing is unavailable on Android".to_owned())
+    }
+}
+
+/// Stop native capture and wait for its resources to be released.
+#[tauri::command]
+pub(crate) async fn stop_native_screen_share(
+    state: tauri::State<'_, crate::state::AppState>,
+    server_id: Option<String>,
+) -> Result<(), String> {
+    #[cfg(not(target_os = "android"))]
+    { state.stop_native_screen_share(server_id).await }
+    #[cfg(target_os = "android")]
+    { let _ = (state, server_id); Ok(()) }
+}
+
+/// Read native broadcast status without depending on the current UI tab.
+#[tauri::command]
+pub(crate) fn native_screen_share_status(
+    state: tauri::State<'_, crate::state::AppState>,
+    server_id: Option<String>,
+) -> Result<serde_json::Value, String> {
+    #[cfg(not(target_os = "android"))]
+    { serde_json::to_value(state.native_screen_share_status(server_id)?).map_err(|e| e.to_string()) }
+    #[cfg(target_os = "android")]
+    { let _ = (state, server_id); Ok(serde_json::Value::Null) }
+}
 
 /// List the video encoders on this machine, with availability.
 ///
@@ -61,6 +107,24 @@ pub(crate) struct ResolvedScreenShare {
     /// The encoder that will be opened, and whether the user's explicit
     /// choice had to be dropped to get there.
     pub(crate) encoder: Selection,
+    /// How viewers will be served.
+    pub(crate) transport: TransportPlan,
+}
+
+/// How this broadcast will reach its viewers.
+///
+/// Resolved up front so the UI can be honest before anything starts: telling
+/// a user "direct connections for the first 2 viewers" and then silently
+/// serving everyone through the SFU - because their server does not relay for
+/// it - would be worse than saying so.
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TransportPlan {
+    /// How many viewers will be offered a direct connection.  Zero means
+    /// every viewer goes through the SFU.
+    pub(crate) direct_slots: u32,
+    /// Why no viewer will be direct, when `direct_slots` is zero.
+    pub(crate) sfu_only_reason: Option<SfuReason>,
 }
 
 /// Validate settings and resolve them against a capture source.
@@ -73,6 +137,7 @@ pub(crate) struct ResolvedScreenShare {
 #[tauri::command]
 pub(crate) async fn resolve_screen_share_encoding(
     app: tauri::AppHandle,
+    state: tauri::State<'_, crate::state::AppState>,
     settings: ScreenShareSettings,
     source_width: u32,
     source_height: u32,
@@ -81,6 +146,8 @@ pub(crate) async fn resolve_screen_share_encoding(
         width: source_width,
         height: source_height,
     })?;
+
+    let transport = plan_transport(&settings, &state);
 
     let data_dir = crate::e2e_data_dir(&app)?;
     let report = tokio::task::spawn_blocking(move || encoder::report(&data_dir, false))
@@ -100,5 +167,21 @@ pub(crate) async fn resolve_screen_share_encoding(
         );
     }
 
-    Ok(ResolvedScreenShare { encoding, encoder })
+    Ok(ResolvedScreenShare { encoding, encoder, transport })
+}
+
+/// Work out how viewers will be served, given the settings and the server.
+///
+/// A server that does not advertise `webrtc_p2p_relay_available` cannot carry
+/// the P2P signal types at all, so its answer overrides whatever the user
+/// asked for (see `TODO.md` 3.0).
+fn plan_transport(
+    settings: &ScreenShareSettings,
+    state: &crate::state::AppState,
+) -> TransportPlan {
+    let allocator = Allocator::new(settings, state.server_relays_p2p());
+    TransportPlan {
+        direct_slots: allocator.free_slots(),
+        sfu_only_reason: allocator.sfu_only_reason(),
+    }
 }

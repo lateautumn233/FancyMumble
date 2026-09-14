@@ -120,6 +120,7 @@ impl Options {
             resolution: self.resolution,
             fps: self.fps,
             bitrate_kbps: None,
+            ..ScreenShareSettings::default()
         }
     }
 }

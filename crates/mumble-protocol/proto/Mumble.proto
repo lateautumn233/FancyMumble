@@ -686,6 +686,17 @@ message ServerConfig {
 	// per-plugin `base_url` when contacting the REST API. Empty /
 	// unset means "no override; use whatever the plugin advertises".
 	optional string fancy_rest_api_url = 9;
+	// True when the server relays the P2P_* WebRtcSignal types between
+	// clients instead of feeding them to its SFU.
+	//
+	// Peer-to-peer screen sharing needs this: a server with an SFU loaded
+	// intercepts SDP_OFFER and ICE_CANDIDATE and drops SDP_ANSWER, so
+	// direct connections cannot be negotiated over the existing signal
+	// types. Absent or false means "do not attempt P2P" - not just
+	// because it would fail, but because proto2 maps the unknown P2P_*
+	// values onto START, which the server would answer by creating an
+	// SFU session and broadcasting to the channel.
+	optional bool webrtc_p2p_relay_available = 10;
 }
 
 // Sent by the server to inform the clients of suggested client configuration
@@ -1124,6 +1135,38 @@ message WebRtcSignal {
 		SDP_OFFER     = 2;
 		SDP_ANSWER    = 3;
 		ICE_CANDIDATE = 4;
+
+		// --- Peer-to-peer screen sharing (Fancy Mumble extension) ---
+		//
+		// Separate values rather than a flag on the existing ones, because
+		// a server with an SFU loaded intercepts SDP_OFFER and
+		// ICE_CANDIDATE for the SFU and silently drops SDP_ANSWER. These
+		// values tell it to relay instead, leaving every existing
+		// signalling path untouched.
+		//
+		// Only usable when the server advertises
+		// ServerConfig.webrtc_p2p_relay_available. Sending them to a server
+		// without P2P relay support is not merely ineffective: proto2 maps
+		// an unknown enum value onto the default (START), which such a
+		// server would answer by creating an SFU session and broadcasting
+		// to the whole channel.
+
+		// Broadcaster offers a direct connection to one viewer. The
+		// broadcaster initiates, because only it knows how many P2P slots
+		// are left.
+		P2P_OFFER     = 5;
+		// Viewer's answer to a P2P_OFFER.
+		P2P_ANSWER    = 6;
+		// ICE candidate for a P2P connection, in either direction.
+		P2P_ICE       = 7;
+		// Viewer asks to watch, so the broadcaster can decide between a
+		// direct connection and the SFU. Carries no payload.
+		P2P_REQUEST   = 8;
+		// Broadcaster declines a P2P_REQUEST: no slots left, or P2P is
+		// disabled. The viewer falls back to the SFU.
+		P2P_DECLINE   = 9;
+		// Viewer stopped watching; release its direct connection and slot.
+		P2P_LEAVE     = 10;
 	}
 	optional SignalType signal_type = 3;
 

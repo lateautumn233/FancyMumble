@@ -47,6 +47,8 @@ mod query;
 pub(crate) mod recording;
 mod registry;
 mod search;
+#[cfg(not(target_os = "android"))]
+mod screen_share;
 mod sessions;
 mod shared_handle;
 pub mod types;
@@ -187,6 +189,8 @@ pub(super) struct ConnectionFields {
 
 #[derive(Default)]
 pub(super) struct SharedState {
+    #[cfg(not(target_os = "android"))]
+    pub native_broadcast: Option<crate::media::broadcast::Handle>,
     pub conn: ConnectionFields,
     pub server: ServerMetadata,
     pub users: HashMap<u32, UserEntry>,
@@ -309,6 +313,22 @@ impl AppState {
             #[cfg(not(target_os = "android"))]
             draw_overlay_tracker: Mutex::new(None),
         }
+    }
+
+    /// Whether the active server relays the `P2P_*` screen-share signals.
+    ///
+    /// Gates peer-to-peer screen sharing: a server that does not advertise
+    /// this intercepts the ordinary signal types for its SFU, and proto2
+    /// would read a `P2P_*` value as `START` - so an unsupported server is
+    /// not merely unhelpful, it would broadcast a bogus SFU session to the
+    /// channel.  A poisoned lock or a missing session reads as `false`,
+    /// which is the safe answer.
+    pub(crate) fn server_relays_p2p(&self) -> bool {
+        self.inner
+            .snapshot()
+            .lock()
+            .map(|s| s.server.config.webrtc_p2p_relay_available)
+            .unwrap_or(false)
     }
 
     /// Build a fresh, empty per-session `SharedState` seeded with the

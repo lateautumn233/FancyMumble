@@ -156,6 +156,8 @@ export interface MumbleServerConfig {
   max_image_message_length: number;
   allow_html: boolean;
   webrtc_sfu_available: boolean;
+  /** Whether the server can relay directed P2P screen-share signaling. */
+  webrtc_p2p_relay_available?: boolean;
   /**
    * Optional override for the Fancy Mumble REST API base URL, sent by
    * the server when its HTTP interface is hosted behind a reverse

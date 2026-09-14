@@ -22,6 +22,9 @@ impl HandleMessage for mumble_tcp::ServerConfig {
             if let Some(sfu) = self.webrtc_sfu_available {
                 state.server.config.webrtc_sfu_available = sfu;
             }
+            if let Some(p2p) = self.webrtc_p2p_relay_available {
+                state.server.config.webrtc_p2p_relay_available = p2p;
+            }
             // Treat empty string as "no override" so an admin can
             // clear a previously-set URL by blanking the config value.
             state.server.config.fancy_rest_api_url = self
@@ -39,6 +42,7 @@ impl HandleMessage for mumble_tcp::ServerConfig {
                 allow_html = state.server.config.allow_html,
                 max_users = ?state.server.max_users,
                 webrtc_sfu = state.server.config.webrtc_sfu_available,
+                webrtc_p2p_relay = state.server.config.webrtc_p2p_relay_available,
                 fancy_rest_api_url = ?state.server.config.fancy_rest_api_url,
                 "server config received"
             );

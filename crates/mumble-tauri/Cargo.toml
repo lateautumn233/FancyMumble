@@ -86,6 +86,21 @@ tauri-plugin-window-state = "2"
 # Auto-updater (desktop only). All updater logic lives in `src/updater/`.
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
+# WebRTC transport for native screen sharing: the broadcaster sends encoded
+# frames to the server's SFU and, in P2P mode, directly to viewers.
+#
+# webrtc-rs rather than str0m (which the server's SFU uses) because P2P needs
+# a TURN client and ICE candidate gathering, and str0m leaves both to the
+# caller - see `TODO.md` "已定：广播端用 webrtc-rs". Not behind the
+# `native-screenshare` feature: unlike FFmpeg this is pure Rust with no vcpkg
+# or libclang requirement, so CI can build it.
+webrtc = "0.20.5"
+async-trait = "0.1"
+# The Sans-I/O protocol core `webrtc` is built on. A direct dependency because
+# the configuration types (MediaEngine, codec parameters, SDP, ICE) live here
+# and `webrtc` only re-exports its error type. **The version must match
+# `webrtc` exactly**: two copies would be two incompatible sets of types.
+rtc = "0.20.5"
 # Android: mumble-protocol with Opus codec + oboe for native audio I/O.
 [target.'cfg(target_os = "android")'.dependencies]
 mumble-protocol = { path = "../mumble-protocol", features = ["opus-codec", "persistent-chat", "rnnoise-denoiser"] }

@@ -6,6 +6,10 @@ use crate::state::types::WebRtcSignalPayload;
 
 impl HandleMessage for mumble_tcp::WebRtcSignal {
     fn handle(&self, ctx: &HandlerContext) {
+        #[cfg(not(target_os = "android"))]
+        if let Ok(state) = ctx.shared.lock() {
+            if crate::state::screen_share::route(&state, self) { return; }
+        }
         debug!(
             sender = ?self.sender_session,
             target = ?self.target_session,
