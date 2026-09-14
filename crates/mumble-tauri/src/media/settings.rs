@@ -34,19 +34,23 @@ const SCREEN_BITS_PER_PIXEL: f64 = 0.07;
 
 /// Which native capture backend feeds the encoder.
 ///
-/// Both produce `AV_PIX_FMT_D3D11` frames on the same device, so the rest
-/// of the pipeline (`scale_d3d11` then the encoder) is identical.
+/// Both are `FFmpeg` filters that emit `AV_PIX_FMT_D3D11` frames on the
+/// device we hand them, so the encoder stage is identical for both.  No
+/// pixel-format conversion happens in between: `nvenc` and `amf` take the
+/// BGRA hardware frames directly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) enum CaptureBackend {
     /// `FFmpeg`'s `ddagrab` filter (DXGI Desktop Duplication).  Whole
-    /// monitors only, but it paces frames itself.
+    /// monitors only and it cannot scale, but it paces frames itself and
+    /// repeats the last one while the desktop is idle.
     #[default]
     Ddagrab,
-    /// Windows Graphics Capture.  Can target a single window, but only
-    /// emits a frame when the content changes, so the pipeline supplies
-    /// its own frame clock.
-    WindowsCapture,
+    /// `FFmpeg`'s `gfxcapture` filter (Windows Graphics Capture, new in
+    /// `FFmpeg` 8.1).  Can target a single window and scales on the GPU,
+    /// but only emits a frame when the content changes, so the pipeline
+    /// supplies its own frame clock.
+    Gfxcapture,
 }
 
 

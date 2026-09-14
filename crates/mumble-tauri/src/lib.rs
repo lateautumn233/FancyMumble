@@ -250,6 +250,22 @@ fn set_webview_memory_target(window: &tauri::Window, low: bool) {
     }
 }
 
+/// Hidden CLI flags that re-run this executable as a helper, not as the app.
+///
+/// Must run before single-instance handling, which would otherwise forward
+/// the flag to the already-running app as if it were a deep link and exit
+/// without printing anything.
+fn handle_media_cli_flags() -> bool {
+    if media::encoder::handle_probe_cli() {
+        return true;
+    }
+    #[cfg(all(target_os = "windows", feature = "native-screenshare"))]
+    if media::selftest::handle_cli() {
+        return true;
+    }
+    false
+}
+
 /// Tauri commands, and starts the application event loop.
 #[allow(clippy::expect_used, reason = "Tauri builder failure during startup is unrecoverable")]
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -262,12 +278,7 @@ pub fn run() {
         *guard = Some(dhat::Profiler::new_heap());
     }
 
-    // Encoder probing re-runs this executable with a hidden flag and reads
-    // one JSON object off its stdout.  This has to come before
-    // single-instance handling, which would otherwise forward the flag to
-    // the running app as if it were a deep link and exit without printing
-    // anything.
-    if media::encoder::handle_probe_cli() {
+    if handle_media_cli_flags() {
         return;
     }
 

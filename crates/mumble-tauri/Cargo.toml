@@ -125,6 +125,10 @@ windows = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Graphics_Dxgi",
     "Win32_Graphics_Dxgi_Common",
+    # Per-monitor DPI awareness while enumerating outputs: without it DXGI
+    # reports a DPI-scaled desktop rectangle rather than the panel's real
+    # pixels, and the capture filters work in real pixels.
+    "Win32_UI_HiDpi",
 ], optional = true }
 
 # macOS-only: NSWindow.setContentAspectRatio: for native aspect-ratio

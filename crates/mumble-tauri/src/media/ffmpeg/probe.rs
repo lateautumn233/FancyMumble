@@ -20,6 +20,7 @@ use std::ptr;
 
 use ffmpeg_sys_next as ff;
 
+use super::params::{self, EncoderParams};
 use super::{errstr, log};
 use crate::media::encoder::{ProbeResult, CANDIDATES};
 
@@ -32,25 +33,20 @@ const PROBE_HEIGHT: i32 = 720;
 /// Mid-grey luma and neutral chroma, so the frame is not degenerate.
 const GREY: u8 = 0x80;
 
-/// GOP length for encoders that accept an effectively infinite one.
-///
-/// We never want an encoder inserting IDR frames on its own schedule: key
-/// frames cost bandwidth and the receivers ask for them when they actually
-/// need one (PLI/FIR).  `i32::MAX` is what hwcodec uses and NVENC accepts it.
-const GOP_INFINITE: i32 = i32::MAX;
+/// Bit rate used while probing.  Never leaves this process, but rate control
+/// has to be given something plausible for the frame size.
+const PROBE_BITRATE_BPS: i64 = 4_000_000;
 
-/// GOP length for the D3D12 encoders, which cannot take [`GOP_INFINITE`].
+/// The parameters every probe attempt is made with.
 ///
-/// `h264_d3d12va` derives H.264's `log2_max_frame_num_minus4` from the GOP
-/// length, and the field only reaches 12, i.e. a frame number wrapping at
-/// 2^16.  `i32::MAX` computes to 27 and it refuses the very first frame with
-/// `log2_max_frame_num_minus4 out of range`.  16384 frames is 9 minutes at
-/// 30 fps, which is "never" for our purposes and well inside the field.
-///
-/// Applied to the HEVC and AV1 D3D12 encoders too: they derive equivalent
-/// bitstream fields the same way, so the same ceiling problem applies even
-/// though the field names differ.
-const GOP_D3D12VA: i32 = 16_384;
+/// Shared with the live pipeline through [`params::configure`], so an encoder
+/// that passes probing is opened the same way when it matters.
+const PROBE_PARAMS: EncoderParams = EncoderParams {
+    width: PROBE_WIDTH,
+    height: PROBE_HEIGHT,
+    fps: 30,
+    bitrate_bps: PROBE_BITRATE_BPS,
+};
 
 /// Owns an `AVCodecContext` and frees it on drop.
 struct CodecContext(*mut ff::AVCodecContext);
@@ -199,7 +195,7 @@ fn probe_one(id: &str) -> Result<(), String> {
         return Err("could not allocate codec context".to_owned());
     }
 
-    configure(ctx.0, id);
+    params::configure(ctx.0, id, &PROBE_PARAMS);
 
     // Hardware-frame encoders need a device and frame pool that stay alive
     // for as long as the codec context uses them, hence the bindings here.
@@ -219,119 +215,13 @@ fn probe_one(id: &str) -> Result<(), String> {
     encode_one(ctx.0, frame.0)
 }
 
-/// Apply the shared encoder parameters from `TODO.md` 0.6.
-///
-/// Low latency throughout: no B-frames, no lookahead, and a GOP so long
-/// that the encoder never inserts an IDR on its own - key frames are the
-/// caller's business, driven by receiver PLI/FIR.
-fn configure(ctx: *mut ff::AVCodecContext, id: &str) {
-    // SAFETY: `ctx` is a live context that we exclusively own, and every
-    // field written here is a plain scalar declared by `AVCodecContext`.
-    unsafe {
-        let c = &mut *ctx;
-        c.width = PROBE_WIDTH;
-        c.height = PROBE_HEIGHT;
-        // Millisecond time base: presentation timestamps are wall-clock ms.
-        c.time_base = ff::AVRational { num: 1, den: 1000 };
-        c.framerate = ff::AVRational { num: 30, den: 1 };
-        c.bit_rate = 4_000_000;
-        let gop = if id.ends_with("_d3d12va") { GOP_D3D12VA } else { GOP_INFINITE };
-        c.gop_size = gop;
-        c.keyint_min = gop;
-        c.max_b_frames = 0;
-        c.has_b_frames = 0;
-        c.slices = 1;
-        c.thread_type = ff::FF_THREAD_SLICE;
-        c.flags |= ff::AV_CODEC_FLAG_LOW_DELAY as i32;
-        c.flags2 |= ff::AV_CODEC_FLAG2_LOCAL_HEADER;
-        c.color_range = ff::AVColorRange::AVCOL_RANGE_MPEG;
-        c.colorspace = ff::AVColorSpace::AVCOL_SPC_SMPTE170M;
-        c.color_primaries = ff::AVColorPrimaries::AVCOL_PRI_SMPTE170M;
-        c.color_trc = ff::AVColorTransferCharacteristic::AVCOL_TRC_SMPTE170M;
-
-        if let Some(profile) = profile_for(id) {
-            c.profile = profile;
-        }
-
-        // QSV emulates CBR through VBR with a matched ceiling, and needs
-        // relaxed compliance to accept it.
-        if id.ends_with("_qsv") {
-            c.rc_max_rate = c.bit_rate;
-            c.strict_std_compliance = ff::FF_COMPLIANCE_UNOFFICIAL;
-        }
-    }
-}
-
-/// The profile to request, or `None` to let the encoder decide.
-///
-/// H.264 High matches str0m's `profile-level-id=64001f` variant, which is
-/// what the SFU negotiates (see `TODO.md` 0.1).  HEVC Main and AV1 Main are
-/// the 8-bit 4:2:0 baselines every decoder that supports the codec at all
-/// can handle.
-///
-/// The D3D12 encoders derive the profile from the frame format themselves and
-/// reject the hint, so they get `None`.
-fn profile_for(id: &str) -> Option<i32> {
-    if id.ends_with("_d3d12va") {
-        return None;
-    }
-    if id.starts_with("h264") || id == "libopenh264" {
-        return Some(ff::AV_PROFILE_H264_HIGH);
-    }
-    if id.starts_with("hevc") {
-        return Some(ff::AV_PROFILE_HEVC_MAIN);
-    }
-    if id.starts_with("av1") {
-        return Some(ff::AV_PROFILE_AV1_MAIN);
-    }
-    None
-}
-
-/// Vendor-private low-latency options, per `TODO.md` 0.6.
-///
-/// Set on `priv_data` before opening.  An option a given build does not
-/// recognise is logged and skipped rather than treated as fatal: these are
-/// tuning hints, and the probe's question is whether the encoder works at
-/// all.
-fn private_options(id: &str) -> &'static [(&'static str, &'static str)] {
-    // Keyed on the vendor suffix, so the HEVC and AV1 variants of each
-    // vendor's encoder get the same treatment as the H.264 one.
-    if id.ends_with("_nvenc") {
-        // `delay=0` makes NVENC return each packet immediately instead of
-        // buffering; `rc=cbr` gives the constant rate a live stream wants.
-        return &[("delay", "0"), ("rc", "cbr")];
-    }
-    if id.ends_with("_amf") {
-        // AMF blocks up to `query_timeout` ms waiting for output rather
-        // than spinning.
-        return &[("query_timeout", "1000"), ("rc", "cbr")];
-    }
-    if id.ends_with("_qsv") {
-        // One frame in flight, so latency does not grow with queue depth.
-        return &[("async_depth", "1")];
-    }
-    &[]
-}
-
-/// Apply [`private_options`], then open the encoder.
+/// Apply the vendor-private options, then open the encoder.
 fn open_encoder(
     ctx: *mut ff::AVCodecContext,
     codec: *const ff::AVCodec,
     id: &str,
 ) -> Result<(), String> {
-    for (key, value) in private_options(id) {
-        let Ok(key_c) = CString::new(*key) else { continue };
-        let Ok(value_c) = CString::new(*value) else { continue };
-        // SAFETY: `priv_data` belongs to the codec's private context,
-        // allocated by `avcodec_alloc_context3`; both strings are valid and
-        // NUL-terminated for the duration of the call.
-        let ret = unsafe {
-            ff::av_opt_set((*ctx).priv_data, key_c.as_ptr(), value_c.as_ptr(), 0)
-        };
-        if ret < 0 {
-            tracing::debug!("{id}: option {key}={value} rejected ({})", errstr(ret));
-        }
-    }
+    params::apply_private_options(ctx, id);
 
     // SAFETY: `ctx` is configured and owned by us; `codec` is the static
     // descriptor the context was allocated from.
