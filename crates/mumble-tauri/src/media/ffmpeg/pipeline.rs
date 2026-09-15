@@ -80,6 +80,10 @@ pub(crate) fn start(
 ) -> Result<PipelineHandle, String> {
     let assembled = assemble(config, adapter_index, source_size)?;
     let Assembled { mut graph, mut encoder, encoding, devices } = assembled;
+    let encode_span = tracing::info_span!("screen_share_encode",
+        encoder = %config.encoder_id, capture = ?config.settings.capture,
+        adapter_index, width = encoding.size.width, height = encoding.size.height,
+        fps = encoding.fps, bitrate_kbps = encoding.bitrate_kbps);
 
     let shared = Arc::new(Shared::default());
     let mailbox = Arc::new(Mailbox::default());
@@ -102,6 +106,7 @@ pub(crate) fn start(
     let encode = std::thread::Builder::new()
         .name("screenshare-encode".to_owned())
         .spawn(move || {
+            let _entered = encode_span.enter();
             encode_loop(&mut encoder, &encode_shared, &encode_mailbox, fps, &mut sink);
             drop(devices);
         })
@@ -124,7 +129,7 @@ fn assemble(
     super::log::install();
 
     let d3d11 = Arc::new(device::d3d11(adapter_index)?);
-    let input = EncoderInput::for_encoder(&config.encoder_id);
+    let input = config.encoder_input;
 
     // Resolve the settings only once the source's real size is known: "native"
     // and the presets both mean something different for a 2560x1440 monitor
@@ -141,6 +146,10 @@ fn assemble(
         input,
         draw_cursor: config.draw_cursor,
     })?;
+
+    tracing::info!(encoder = %config.encoder_id, adapter_index, source_size = ?source_size,
+        encoding = ?requested, input = ?input, filters = ?steps,
+        "screen-share capture chain configured");
 
     // Only the D3D12 encoders need a second device, and it is a plain upload
     // target, so it is created lazily.
@@ -311,6 +320,7 @@ fn encode_loop(
     let mut current: Option<Frame> = None;
     let mut last_pts = i64::MIN;
     let mut packets = Vec::new();
+    let mut first_packet_logged = false;
 
     while !shared.should_stop() {
         let repeated = match wait_for_frame(mailbox, interval) {
@@ -337,8 +347,16 @@ fn encode_loop(
             repeated,
         );
         if let Err(message) = outcome {
+            tracing::error!(error = %message, elapsed_ms = started.elapsed().as_millis() as u64,
+                pts_ms = last_pts, repeated, stats = ?shared.stats.snapshot(),
+                "screen-share encoding failed");
             shared.finish(StopReason::Failed { message });
             break;
+        }
+        if !first_packet_logged && shared.stats.snapshot().packets > 0 {
+            first_packet_logged = true;
+            tracing::info!(elapsed_ms = started.elapsed().as_millis() as u64,
+                stats = ?shared.stats.snapshot(), "screen-share first encoded packet produced");
         }
     }
 }

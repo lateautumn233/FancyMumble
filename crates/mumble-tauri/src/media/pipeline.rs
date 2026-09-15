@@ -23,7 +23,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-use super::capture::CaptureSource;
+use super::capture::{CaptureSource, EncoderInput};
 use super::settings::{ResolvedEncoding, ScreenShareSettings};
 
 pub(crate) use super::frame::{EncodedFrame, FrameSink};
@@ -43,6 +43,8 @@ pub(crate) struct PipelineConfig {
     /// The `FFmpeg` encoder to open, as resolved from the user's choice
     /// against the probe results.
     pub(crate) encoder_id: String,
+    /// The input path that the encoder probe successfully opened and encoded.
+    pub(crate) encoder_input: EncoderInput,
     /// Whether to composite the mouse cursor into the frames.
     pub(crate) draw_cursor: bool,
 }
@@ -310,8 +312,16 @@ pub(crate) fn start(
     config: &PipelineConfig,
     sink: FrameSink,
 ) -> Result<PipelineHandle, String> {
-    let (adapter_index, source_size) = locate(config.source)?;
-    super::ffmpeg::pipeline::start(config, adapter_index, source_size, sink)
+    tracing::info!(encoder = %config.encoder_id, source = ?config.source,
+        settings = ?config.settings, "screen-share pipeline starting");
+    let result = locate(config.source).and_then(|(adapter_index, source_size)| {
+        super::ffmpeg::pipeline::start(config, adapter_index, source_size, sink)
+    });
+    if let Err(error) = &result {
+        tracing::error!(encoder = %config.encoder_id, error = %error,
+            "screen-share pipeline startup failed");
+    }
+    result
 }
 
 /// Find the adapter that drives a capture source, and the source's size.
@@ -324,8 +334,11 @@ fn locate(source: CaptureSource) -> Result<(u32, super::settings::OutputSize), S
 
     match source {
         CaptureSource::Monitor { .. } => {
-            let display = display::find(source)?;
-            Ok((display.adapter_index, display.size))
+            let selected = display::find(source)?;
+            tracing::info!(adapter_index = selected.adapter_index,
+                adapter_name = %selected.adapter_name, output_index = selected.output_index,
+                "screen-share capture adapter selected");
+            Ok((selected.adapter_index, selected.size))
         }
         CaptureSource::Window { .. } => {
             // A window has no adapter of its own, and its size is measured
@@ -340,6 +353,9 @@ fn locate(source: CaptureSource) -> Result<(u32, super::settings::OutputSize), S
                 .find(|d| d.is_primary)
                 .or_else(|| displays.first())
                 .ok_or_else(|| "no display found".to_owned())?;
+            tracing::info!(adapter_index = primary.adapter_index,
+                adapter_name = %primary.adapter_name,
+                "screen-share window capture adapter selected");
             Ok((primary.adapter_index, primary.size))
         }
     }

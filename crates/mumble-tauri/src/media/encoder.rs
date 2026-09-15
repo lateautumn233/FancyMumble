@@ -16,6 +16,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::capture::EncoderInput;
 use super::settings::EncoderChoice;
 
 /// Hidden CLI flag that puts the process into probe mode.
@@ -183,6 +184,8 @@ pub(crate) struct EncoderInfo {
     /// Why it is unavailable, taken from `FFmpeg`'s own error output, e.g.
     /// `DLL amfrt64.dll failed to open`.  `None` when available.
     pub(crate) detail: Option<String>,
+    /// The input path that passed the real encoder probe.
+    pub(crate) input: Option<EncoderInput>,
 }
 
 impl EncoderInfo {
@@ -195,6 +198,7 @@ impl EncoderInfo {
             is_hardware: candidate.is_hardware,
             available: false,
             detail: Some(reason.into()),
+            input: None,
         }
     }
 }
@@ -244,7 +248,11 @@ impl EncoderReport {
     /// selects them explicitly.
     #[cfg(any(test, all(target_os = "windows", feature = "native-screenshare")))]
     fn auto_pick(encoders: &[EncoderInfo]) -> Option<String> {
-        let usable = || encoders.iter().filter(|e| e.available && e.codec == AUTO_CODEC);
+        let usable = || {
+            encoders
+                .iter()
+                .filter(|e| e.available && e.codec == AUTO_CODEC && e.input.is_some())
+        };
         usable()
             .find(|e| e.is_hardware)
             .or_else(|| usable().next())
@@ -259,15 +267,23 @@ impl EncoderReport {
     pub(crate) fn resolve_choice(&self, choice: &EncoderChoice) -> Result<Selection, String> {
         let requested = choice.id();
         if let Some(id) = requested {
-            if self.encoders.iter().any(|e| e.id == id && e.available) {
-                return Ok(Selection { id: id.to_owned(), fell_back: false });
+            if let Some(entry) = self.encoders.iter().find(|e| e.id == id && e.available) {
+                if let Some(input) = entry.input {
+                    return Ok(Selection { id: id.to_owned(), fell_back: false, input });
+                }
             }
         }
         let picked = self
             .auto_selected
             .clone()
             .ok_or_else(|| format!("no working {AUTO_CODEC} encoder found on this machine"))?;
-        Ok(Selection { id: picked, fell_back: requested.is_some() })
+        let input = self
+            .encoders
+            .iter()
+            .find(|e| e.id == picked && e.available)
+            .and_then(|e| e.input)
+            .ok_or_else(|| format!("encoder {picked} has no probed input path"))?;
+        Ok(Selection { id: picked, fell_back: requested.is_some(), input })
     }
 }
 
@@ -280,6 +296,8 @@ pub(crate) struct Selection {
     /// `true` when the user's explicit choice was unavailable and
     /// automatic selection stepped in.
     pub(crate) fell_back: bool,
+    /// The input path proven usable for [`Self::id`].
+    pub(crate) input: EncoderInput,
 }
 
 /// One candidate's probe outcome, as reported by the subprocess.
@@ -295,6 +313,8 @@ pub(crate) struct ProbeResult {
     /// How long the attempt took; a hardware encoder's first open pays
     /// driver-initialisation cost (~300 ms for NVENC on a warm machine).
     pub(crate) elapsed_ms: u64,
+    /// The first input path that opened and produced a key frame.
+    pub(crate) input: Option<EncoderInput>,
 }
 
 /// What the probe subprocess prints to stdout: exactly one JSON object.
@@ -316,13 +336,14 @@ fn merge(results: &[ProbeResult]) -> Vec<EncoderInfo> {
         .map(|candidate| {
             let found = results.iter().find(|r| r.id == candidate.id);
             match found {
-                Some(r) if r.available => EncoderInfo {
+                Some(r) if r.available && r.input.is_some() => EncoderInfo {
                     id: candidate.id.to_owned(),
                     display_name: candidate.display_name.to_owned(),
                     codec: candidate.codec.to_owned(),
                     is_hardware: candidate.is_hardware,
                     available: true,
                     detail: None,
+                    input: r.input,
                 },
                 Some(r) => EncoderInfo::unavailable(
                     candidate,
@@ -417,7 +438,10 @@ mod native {
 
         if !refresh {
             if let Some(cached) = cache::load(data_dir) {
-                if cached.supported && cached.gpu_signature == signature {
+                if cached.supported
+                    && cached.gpu_signature == signature
+                    && cached.encoders.iter().all(|e| !e.available || e.input.is_some())
+                {
                     tracing::debug!("using cached encoder probe for {signature}");
                     return cached;
                 }
@@ -428,10 +452,11 @@ mod native {
             Ok(output) => {
                 for r in &output.results {
                     tracing::info!(
-                        "encoder probe {}: available={} ({} ms) {}",
+                        "encoder probe {}: available={} ({} ms) {} {}",
                         r.id,
                         r.available,
                         r.elapsed_ms,
+                        r.input.map(|input| format!("input={input:?}")).unwrap_or_default(),
                         r.detail.as_deref().unwrap_or("")
                     );
                 }
@@ -569,6 +594,7 @@ mod tests {
             available,
             detail: if available { None } else { Some("nope".to_owned()) },
             elapsed_ms: 1,
+            input: if available { Some(EncoderInput::SysMemNv12) } else { None },
         }
     }
 

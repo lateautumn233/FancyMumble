@@ -22,6 +22,7 @@ use ffmpeg_sys_next as ff;
 
 use super::params::{self, EncoderParams};
 use super::{errstr, log};
+use crate::media::capture::EncoderInput;
 use crate::media::encoder::{ProbeResult, CANDIDATES};
 
 /// Probe frame size.  720p is large enough that every hardware encoder
@@ -96,38 +97,14 @@ impl Drop for BufferRef {
     }
 }
 
-/// What kind of frame an encoder accepts as input.
-#[derive(Debug, Clone, Copy)]
-enum InputMode {
-    /// A plain system-memory frame in this pixel format.
-    SysMem(ff::AVPixelFormat),
-    /// A hardware frame from this device type, backed by this software
-    /// format.  Used for `h264_d3d12va`, which rejects system memory.
-    Hardware {
-        /// Hardware device to create.
-        device: ff::AVHWDeviceType,
-        /// Software pixel format the surface pool is built from.
-        sw_format: ff::AVPixelFormat,
-    },
-}
-
-/// The input mode each candidate needs.
-///
-/// Measured on this machine (see `TODO.md` 0.4): `libopenh264` rejects NV12
-/// and only takes `yuv420p`, and `h264_d3d12va` rejects system memory
-/// entirely and needs a real D3D12 frame pool.
-fn input_mode(id: &str) -> InputMode {
-    if id == "libopenh264" {
-        return InputMode::SysMem(ff::AVPixelFormat::AV_PIX_FMT_YUV420P);
-    }
-    if id.ends_with("_d3d12va") {
-        return InputMode::Hardware {
-            device: ff::AVHWDeviceType::AV_HWDEVICE_TYPE_D3D12VA,
-            sw_format: ff::AVPixelFormat::AV_PIX_FMT_NV12,
-        };
-    }
-    InputMode::SysMem(ff::AVPixelFormat::AV_PIX_FMT_NV12)
-}
+/// Input paths tried in the same order as OBS: prefer a zero-copy D3D11
+/// surface, then portable system-memory formats, then D3D12.
+const INPUT_CANDIDATES: &[EncoderInput] = &[
+    EncoderInput::HardwareD3d11,
+    EncoderInput::SysMemNv12,
+    EncoderInput::HardwareD3d12,
+    EncoderInput::SysMemYuv420p,
+];
 
 /// Probe every candidate in catalogue order.
 ///
@@ -146,17 +123,19 @@ pub(crate) fn probe_all() -> Vec<ProbeResult> {
             let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
 
             match outcome {
-                Ok(()) => ProbeResult {
+                Ok(input) => ProbeResult {
                     id: candidate.id.to_owned(),
                     available: true,
                     detail: None,
                     elapsed_ms,
+                    input: Some(input),
                 },
                 Err(reason) => ProbeResult {
                     id: candidate.id.to_owned(),
                     available: false,
                     detail: Some(detail(&reason, &logged)),
                     elapsed_ms,
+                    input: None,
                 },
             }
         })
@@ -179,7 +158,7 @@ fn detail(reason: &str, logged: &[String]) -> String {
 /// Returns `Ok(())` only when a packet with `AV_PKT_FLAG_KEY` comes back:
 /// an encoder that opens but produces nothing usable is not available as
 /// far as the pipeline is concerned.
-fn probe_one(id: &str) -> Result<(), String> {
+fn probe_one(id: &str) -> Result<EncoderInput, String> {
     let name = CString::new(id).map_err(|_| "encoder name contains NUL".to_owned())?;
 
     // SAFETY: `name` is a valid NUL-terminated string; the returned codec
@@ -189,26 +168,118 @@ fn probe_one(id: &str) -> Result<(), String> {
         return Err("not compiled into this FFmpeg build".to_owned());
     }
 
-    // SAFETY: `codec` is non-null, as checked above.
+    let advertised = supported_formats(codec)?;
+    let mut reasons = Vec::new();
+    // Try FFmpeg-advertised paths first, then still verify the remaining
+    // candidates. A few vendor drivers report an incomplete list even though
+    // their fallback system-memory path works.
+    for pass in [true, false] {
+        for input in INPUT_CANDIDATES {
+            if advertised.supports(*input) != pass {
+                continue;
+            }
+            match probe_attempt(codec, id, *input) {
+                Ok(()) => return Ok(*input),
+                Err(reason) => reasons.push(format!("{input:?}: {reason}")),
+            }
+        }
+    }
+    if reasons.is_empty() {
+        Err(format!("no supported input path (advertised: {})", advertised.describe()))
+    } else {
+        Err(reasons.join("; "))
+    }
+}
+
+/// The advertised pixel formats for an encoder, queried through FFmpeg's
+/// capability API rather than inferred from its name.
+struct SupportedFormats {
+    values: Vec<ff::AVPixelFormat>,
+    all: bool,
+}
+
+impl SupportedFormats {
+    fn supports(&self, input: EncoderInput) -> bool {
+        self.all || self.values.iter().copied().any(|format| match input {
+            EncoderInput::HardwareD3d11 => format == ff::AVPixelFormat::AV_PIX_FMT_D3D11,
+            EncoderInput::HardwareD3d12 => format == ff::AVPixelFormat::AV_PIX_FMT_D3D12,
+            EncoderInput::SysMemNv12 => format == ff::AVPixelFormat::AV_PIX_FMT_NV12,
+            EncoderInput::SysMemYuv420p => format == ff::AVPixelFormat::AV_PIX_FMT_YUV420P,
+        })
+    }
+
+    fn describe(&self) -> String {
+        if self.all {
+            return "all".to_owned();
+        }
+        self.values
+            .iter()
+            .map(|format| unsafe { super::cstr(ff::av_get_pix_fmt_name(*format)) })
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+}
+
+fn supported_formats(codec: *const ff::AVCodec) -> Result<SupportedFormats, String> {
+    let mut configs: *const std::ffi::c_void = ptr::null();
+    let mut count = 0;
+    // SAFETY: codec is a static FFmpeg descriptor and output pointers are
+    // valid local slots. FFmpeg owns the returned array.
+    let ret = unsafe {
+        ff::avcodec_get_supported_config(
+            ptr::null(),
+            codec,
+            ff::AVCodecConfig::AV_CODEC_CONFIG_PIX_FORMAT,
+            0,
+            &mut configs,
+            &mut count,
+        )
+    };
+    if ret < 0 {
+        return Err(format!("could not query pixel formats ({})", errstr(ret)));
+    }
+    if configs.is_null() {
+        return Ok(SupportedFormats { values: Vec::new(), all: true });
+    }
+    if count < 0 {
+        return Err("FFmpeg returned a negative pixel-format count".to_owned());
+    }
+    // SAFETY: FFmpeg documents a count-sized array of AVPixelFormat values.
+    let values = unsafe {
+        std::slice::from_raw_parts(configs.cast::<ff::AVPixelFormat>(), count as usize).to_vec()
+    };
+    Ok(SupportedFormats { values, all: false })
+}
+
+fn probe_attempt(codec: *const ff::AVCodec, id: &str, input: EncoderInput) -> Result<(), String> {
+    // SAFETY: codec is a static descriptor returned by FFmpeg.
     let ctx = CodecContext(unsafe { ff::avcodec_alloc_context3(codec) });
     if ctx.0.is_null() {
         return Err("could not allocate codec context".to_owned());
     }
-
     params::configure(ctx.0, id, &PROBE_PARAMS);
 
-    // Hardware-frame encoders need a device and frame pool that stay alive
-    // for as long as the codec context uses them, hence the bindings here.
-    let (_device, _frames, frame) = match input_mode(id) {
-        InputMode::SysMem(pix_fmt) => {
-            // SAFETY: `ctx.0` is a live, freshly allocated context.
-            unsafe { (*ctx.0).pix_fmt = pix_fmt };
-            (BufferRef(ptr::null_mut()), BufferRef(ptr::null_mut()), sysmem_frame(pix_fmt)?)
+    // Hardware-frame encoders need a device and frame pool kept alive until
+    // the encoder has accepted the test frame.
+    let (_device, _frames, frame) = match input {
+        EncoderInput::SysMemNv12 => {
+            unsafe { (*ctx.0).pix_fmt = ff::AVPixelFormat::AV_PIX_FMT_NV12 };
+            (BufferRef(ptr::null_mut()), BufferRef(ptr::null_mut()), sysmem_frame(ff::AVPixelFormat::AV_PIX_FMT_NV12)?)
         }
-        InputMode::Hardware { device, sw_format } => {
-            let (device, frames, frame) = hardware_frame(ctx.0, device, sw_format)?;
-            (device, frames, frame)
+        EncoderInput::SysMemYuv420p => {
+            unsafe { (*ctx.0).pix_fmt = ff::AVPixelFormat::AV_PIX_FMT_YUV420P };
+            (BufferRef(ptr::null_mut()), BufferRef(ptr::null_mut()), sysmem_frame(ff::AVPixelFormat::AV_PIX_FMT_YUV420P)?)
         }
+        EncoderInput::HardwareD3d11 => hardware_frame(
+            ctx.0,
+            ff::AVHWDeviceType::AV_HWDEVICE_TYPE_D3D11VA,
+            ff::AVPixelFormat::AV_PIX_FMT_BGRA,
+        )?,
+        EncoderInput::HardwareD3d12 => hardware_frame(
+            ctx.0,
+            ff::AVHWDeviceType::AV_HWDEVICE_TYPE_D3D12VA,
+            ff::AVPixelFormat::AV_PIX_FMT_NV12,
+        )?,
     };
 
     open_encoder(ctx.0, codec, id)?;

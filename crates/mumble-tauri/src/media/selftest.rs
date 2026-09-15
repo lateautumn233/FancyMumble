@@ -176,13 +176,19 @@ fn run(options: &Options) -> Result<(), String> {
             .source(),
     };
 
-    let encoder_id = pick_encoder(options)?;
-    let config = PipelineConfig { source, settings, encoder_id, draw_cursor: true };
+    let selection = pick_encoder(options)?;
+    let config = PipelineConfig {
+        source,
+        settings,
+        encoder_id: selection.id,
+        encoder_input: selection.input,
+        draw_cursor: true,
+    };
     capture_and_report(&config, options.frames)
 }
 
 /// Resolve the encoder choice against the probe results.
-fn pick_encoder(options: &Options) -> Result<String, String> {
+fn pick_encoder(options: &Options) -> Result<super::encoder::Selection, String> {
     // The self-test runs before the Tauri app exists, so there is no app data
     // directory to cache into; a temporary one keeps the probe from writing
     // into the real cache with a half-configured process.
@@ -195,7 +201,7 @@ fn pick_encoder(options: &Options) -> Result<String, String> {
     if selection.fell_back {
         println!("note: {:?} is unavailable, using {}", options.encoder, selection.id);
     }
-    Ok(selection.id)
+    Ok(selection)
 }
 
 /// Start the pipeline, collect `wanted` frames, and print a summary.

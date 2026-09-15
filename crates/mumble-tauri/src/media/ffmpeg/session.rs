@@ -100,10 +100,31 @@ impl Encoder {
 
         params::apply_private_options(ctx.0, id);
 
+        // The hardware pixel format alone does not identify the underlying texture format.
+        // SAFETY: the owned codec context and its referenced hardware frame context are live.
+        unsafe {
+            let c = &*ctx.0;
+            let sw_format = if c.hw_frames_ctx.is_null() {
+                c.pix_fmt
+            } else {
+                (*((*c.hw_frames_ctx).data.cast::<ff::AVHWFramesContext>())).sw_format
+            };
+            tracing::info!(encoder = id, width = c.width, height = c.height, fps,
+                bitrate_bps, pixel_format = %super::cstr(ff::av_get_pix_fmt_name(c.pix_fmt)),
+                software_format = %super::cstr(ff::av_get_pix_fmt_name(sw_format)),
+                hardware_frames = !c.hw_frames_ctx.is_null(),
+                ffmpeg_version = %super::cstr(ff::av_version_info()),
+                avcodec_version = ff::avcodec_version(),
+                time_base_num = c.time_base.num, time_base_den = c.time_base.den,
+                "screen-share encoder opening");
+        }
+
         // SAFETY: `ctx.0` is configured and owned by us; `codec` is the
         // static descriptor the context was allocated from.
         let ret = unsafe { ff::avcodec_open2(ctx.0, codec, ptr::null_mut()) };
         if ret < 0 {
+            tracing::error!(encoder = id, operation = "avcodec_open2",
+                error_code = ret, error = %errstr(ret), "screen-share encoder open failed");
             return Err(format!("could not open {id} ({})", errstr(ret)));
         }
 
@@ -128,6 +149,9 @@ impl Encoder {
         // configured format and dimensions.
         let ret = unsafe { ff::avcodec_send_frame(self.ctx.0, frame.as_ptr()) };
         if ret < 0 {
+            tracing::error!(encoder = %self.id, operation = "avcodec_send_frame",
+                error_code = ret, error = %errstr(ret), force_key,
+                "screen-share encoder frame submission failed");
             return Err(format!("{} rejected the frame ({})", self.id, errstr(ret)));
         }
         self.drain(packets)?;
@@ -144,6 +168,9 @@ impl Encoder {
                 return Ok(());
             }
             if ret < 0 {
+                tracing::error!(encoder = %self.id, operation = "avcodec_receive_packet",
+                    error_code = ret, error = %errstr(ret),
+                    "screen-share encoder packet receive failed");
                 return Err(format!("{} produced no packet ({})", self.id, errstr(ret)));
             }
 

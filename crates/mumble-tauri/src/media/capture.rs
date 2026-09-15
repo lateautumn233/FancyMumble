@@ -72,7 +72,8 @@ impl CaptureSource {
 }
 
 /// The pixel format family an encoder takes frames in.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) enum EncoderInput {
     /// Takes the capture filter's D3D11 BGRA frames as they are.  No
     /// conversion filter at all, which is what makes the hardware path
@@ -82,8 +83,7 @@ pub(crate) enum EncoderInput {
     /// Takes D3D12 hardware frames, which means a round trip: download the
     /// D3D11 frame, convert to NV12, upload to a D3D12 device.
     HardwareD3d12,
-    /// Takes system-memory NV12.  QSV and Media Foundation; the latter
-    /// advertises `d3d11` but rejects it at open time with `E_NOTIMPL`.
+    /// Takes system-memory NV12.
     SysMemNv12,
     /// Takes system-memory `yuv420p`.  `libopenh264`, which does not accept
     /// NV12 at all.
@@ -91,27 +91,6 @@ pub(crate) enum EncoderInput {
 }
 
 impl EncoderInput {
-    /// What the named `FFmpeg` encoder wants, keyed on its vendor suffix.
-    ///
-    /// Suffix rather than full name so the HEVC and AV1 variants of each
-    /// vendor's encoder are covered by the same rule as the H.264 one.
-    /// Measured per encoder with `avcodec_get_supported_config`; see the
-    /// input-format table in `TODO.md` 0.7.
-    pub(crate) fn for_encoder(id: &str) -> Self {
-        if id.ends_with("_nvenc") || id.ends_with("_amf") {
-            return Self::HardwareD3d11;
-        }
-        if id.ends_with("_d3d12va") {
-            return Self::HardwareD3d12;
-        }
-        if id == "libopenh264" {
-            return Self::SysMemYuv420p;
-        }
-        // QSV (`nv12` or `qsv` only) and Media Foundation.  Anything we do
-        // not recognise gets the most widely accepted format.
-        Self::SysMemNv12
-    }
-
     /// The `FFmpeg` pixel format name a `format` filter should select
     /// before the encoder, or `None` when the frames stay BGRA.
     fn target_format(self) -> Option<&'static str> {
@@ -442,6 +421,38 @@ mod tests {
     }
 
     #[test]
+    fn probed_nv12_input_works_for_both_capture_backends() {
+        let source = OutputSize { width: 2880, height: 1800 };
+        for backend in [CaptureBackend::Ddagrab, CaptureBackend::Gfxcapture] {
+            for target in [
+                OutputSize { width: 1152, height: 720 },
+                OutputSize { width: 1728, height: 1080 },
+                source,
+            ] {
+                let mut req = request(backend, EncoderInput::SysMemNv12, target);
+                req.source_size = source;
+                let steps = plan(&req).unwrap();
+                assert_eq!(req.input, EncoderInput::SysMemNv12);
+                assert_eq!(option(steps.last().unwrap(), "pix_fmts"), Some("nv12"));
+                assert!(steps.iter().any(|step| step.name == "hwdownload"));
+                assert!(steps.iter().all(|step| step.name != "hwupload"));
+                let expected = match (backend, target != source) {
+                    (CaptureBackend::Ddagrab, true) => {
+                        vec!["ddagrab", "hwdownload", "format", "scale", "format"]
+                    }
+                    (CaptureBackend::Ddagrab, false) => {
+                        vec!["ddagrab", "hwdownload", "format", "format"]
+                    }
+                    (CaptureBackend::Gfxcapture, _) => {
+                        vec!["gfxcapture", "hwdownload", "format", "format"]
+                    }
+                };
+                assert_eq!(names(&steps), expected);
+            }
+        }
+    }
+
+    #[test]
     fn d3d12_encoder_uploads_nv12_to_its_own_device() {
         let steps =
             plan(&request(CaptureBackend::Gfxcapture, EncoderInput::HardwareD3d12, QHD)).unwrap();
@@ -484,17 +495,15 @@ mod tests {
     }
 
     #[test]
-    fn encoder_input_matches_the_measured_table() {
-        for (id, expected) in [
-            ("h264_nvenc", EncoderInput::HardwareD3d11),
-            ("hevc_nvenc", EncoderInput::HardwareD3d11),
-            ("av1_amf", EncoderInput::HardwareD3d11),
-            ("h264_d3d12va", EncoderInput::HardwareD3d12),
-            ("h264_qsv", EncoderInput::SysMemNv12),
-            ("h264_mf", EncoderInput::SysMemNv12),
-            ("libopenh264", EncoderInput::SysMemYuv420p),
+    fn encoder_input_round_trips_through_the_probe_cache_format() {
+        for input in [
+            EncoderInput::HardwareD3d11,
+            EncoderInput::HardwareD3d12,
+            EncoderInput::SysMemNv12,
+            EncoderInput::SysMemYuv420p,
         ] {
-            assert_eq!(EncoderInput::for_encoder(id), expected, "{id}");
+            let json = serde_json::to_string(&input).unwrap();
+            assert_eq!(serde_json::from_str::<EncoderInput>(&json).unwrap(), input);
         }
     }
 }

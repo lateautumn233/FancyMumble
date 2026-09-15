@@ -52,6 +52,7 @@ pub(super) fn start(
         source,
         settings: request.settings,
         encoder_id: selection.id,
+        encoder_input: selection.input,
         draw_cursor: request.draw_cursor,
     };
     Ok(Box::new(pipeline::start(&config, sink)?))
