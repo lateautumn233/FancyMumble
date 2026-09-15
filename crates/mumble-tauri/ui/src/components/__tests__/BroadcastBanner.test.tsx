@@ -3,11 +3,73 @@
  *
  * Verifies rendering, watch button interaction, and dismiss behaviour.
  */
-import { describe, it, expect, vi } from "vitest";
-import { render, screen, fireEvent } from "@testing-library/react";
+import { beforeEach, describe, it, expect, vi } from "vitest";
+import { render as renderComponent, screen, fireEvent } from "@testing-library/react";
+import { createInstance } from "i18next";
+import { I18nextProvider } from "react-i18next";
+import type { ReactElement } from "react";
+import enChat from "../../locales/en/chat.json";
+import deChat from "../../locales/de/chat.json";
+import frChat from "../../locales/fr/chat.json";
+import zhChat from "../../locales/zh/chat.json";
+import enCommon from "../../locales/en/common.json";
 import { BroadcastBanner } from "../chat/stream/ScreenShareViewer";
 
+vi.unmock("react-i18next");
+
+const i18n = createInstance();
+
+function render(ui: ReactElement) {
+  return renderComponent(<I18nextProvider i18n={i18n}>{ui}</I18nextProvider>);
+}
+
+beforeEach(async () => {
+  await i18n.init({
+    lng: "en",
+    fallbackLng: "en",
+    interpolation: { escapeValue: false },
+    resources: {
+      en: { chat: enChat, common: enCommon },
+      de: { chat: deChat },
+      fr: { chat: frChat },
+      zh: { chat: zhChat },
+    },
+  });
+});
+
 describe("BroadcastBanner", () => {
+  it.each([
+    ["en", "Alice is sharing their screen"],
+    ["de", "Alice teilt den Bildschirm"],
+    ["fr", "Alice partage son écran"],
+    ["zh", "Alice 正在共享屏幕"],
+  ])("renders the translated message once in %s", async (language, expected) => {
+    await i18n.changeLanguage(language);
+    render(
+      <BroadcastBanner
+        broadcasters={[{ session: 42, name: "Alice" }]}
+        onWatch={vi.fn()}
+      />,
+    );
+    const name = screen.getByText("Alice");
+    expect(name.className).toContain("broadcastBannerName");
+    expect(name.parentElement?.textContent).toBe(expected);
+    expect(screen.getByRole("status").textContent).not.toContain("{{name}}");
+  });
+
+  it("renders markup-like broadcaster names as literal text", () => {
+    const name = "<b>Alice</b> & {{name}}";
+    render(
+      <BroadcastBanner
+        broadcasters={[{ session: 42, name }]}
+        onWatch={vi.fn()}
+      />,
+    );
+    const label = screen.getByText(name);
+    expect(label.parentElement?.textContent).toBe(`${name} is sharing their screen`);
+    expect(label.querySelector("b")).toBeNull();
+  });
+
   it("renders nothing when no broadcasters", () => {
     const { container } = render(
       <BroadcastBanner broadcasters={[]} onWatch={vi.fn()} />,

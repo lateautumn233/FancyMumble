@@ -50,6 +50,8 @@ pub(crate) mod selftest;
 #[cfg(all(target_os = "windows", feature = "native-screenshare"))]
 pub(crate) mod display;
 #[cfg(all(target_os = "windows", feature = "native-screenshare"))]
+pub(crate) mod sources;
+#[cfg(all(target_os = "windows", feature = "native-screenshare"))]
 pub(crate) mod ffmpeg;
 #[cfg(all(target_os = "windows", feature = "native-screenshare"))]
 pub(crate) mod gpu;

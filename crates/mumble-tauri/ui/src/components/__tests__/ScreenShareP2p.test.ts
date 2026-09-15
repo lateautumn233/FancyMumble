@@ -1,16 +1,6 @@
 import { act, renderHook, cleanup } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-type SignalHandler = (sender: number, target: number, kind: number, payload: string, server: string) => void;
-const signals = vi.hoisted(() => ({ handler: null as SignalHandler | null }));
-
-vi.mock("../../store", async (importOriginal) => ({
-  ...await importOriginal<typeof import("../../store")>(),
-  onWebRtcSignal: (handler: SignalHandler) => {
-    signals.handler = handler;
-    return () => { signals.handler = null; };
-  },
-}));
 vi.mock("@tauri-apps/api/event", () => ({ emit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock("../chat/drawing/DrawingOverlay", () => ({
   clearAllStrokesInChannel: vi.fn(), clearStrokesFromSender: vi.fn(),
@@ -21,7 +11,8 @@ vi.mock("../chat/stream/useStreamPreview", () => ({
 }));
 
 import { useAppStore } from "../../store";
-import { useScreenShare } from "../chat/stream/useScreenShare";
+import { useRemoteConnectionStats, useScreenShare } from "../chat/stream/useScreenShare";
+import { dispatchWebRtcSignal, forgetBroadcasts } from "../chat/stream/screenShareSignals";
 
 class Peer {
   static instances: Peer[] = [];
@@ -31,6 +22,7 @@ class Peer {
   onconnectionstatechange: (() => void) | null = null;
   onicecandidate: ((event: { candidate: { toJSON: () => RTCIceCandidateInit } }) => void) | null = null;
   close = vi.fn();
+  getStats = vi.fn().mockResolvedValue(new Map());
   addTransceiver = vi.fn();
   addIceCandidate = vi.fn().mockResolvedValue(undefined);
   createOffer = vi.fn().mockResolvedValue({ type: "offer", sdp: "sfu-offer" });
@@ -42,7 +34,7 @@ class Peer {
 
 const send = vi.fn();
 async function signal(kind: number, payload = "", server = "server-a") {
-  await act(async () => { signals.handler?.(42, 1, kind, payload, server); });
+  await act(async () => { dispatchWebRtcSignal(42, 1, kind, payload, server); });
 }
 
 beforeEach(() => {
@@ -60,14 +52,110 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
-  useAppStore.setState({ activeServerId: "server-a" });
-  await signal(1);
+  await act(async () => {
+    useAppStore.setState({ activeServerId: "server-a" });
+    forgetBroadcasts("server-a");
+    forgetBroadcasts("server-b");
+  });
   cleanup();
   vi.useRealTimers();
   vi.unstubAllGlobals();
 });
 
 describe("native broadcast P2P negotiation", () => {
+  it("restores a broadcast announced before the chat view mounted, including its P2P capabilities", async () => {
+    await signal(0, JSON.stringify({ native: true, p2p: true, sfuAvailable: true }));
+    expect(send).not.toHaveBeenCalled();
+    const { result } = renderHook(() => useScreenShare());
+    expect(result.current.broadcastingSessions.has(42)).toBe(true);
+    expect(send).toHaveBeenCalledWith(42, 8, "", "server-a");
+    expect(Peer.instances).toHaveLength(1);
+    expect(Peer.instances[0].createOffer).not.toHaveBeenCalled();
+  });
+
+  it("replays an early announcement once the active server and own session become known", async () => {
+    useAppStore.setState({ activeServerId: null, ownSession: null });
+    const { result } = renderHook(() => useScreenShare());
+    await signal(0, JSON.stringify({ native: true, p2p: true, sfuAvailable: true }));
+    expect(result.current.broadcastingSessions.size).toBe(0);
+    await act(async () => { useAppStore.setState({ activeServerId: "server-a", ownSession: 1 }); });
+    expect(result.current.broadcastingSessions.has(42)).toBe(true);
+    expect(send).toHaveBeenCalledWith(42, 8, "", "server-a");
+  });
+
+  it("does not restore a broadcast stopped before the chat view mounted", async () => {
+    await signal(0, "");
+    await signal(1);
+    const { result } = renderHook(() => useScreenShare());
+    expect(result.current.broadcastingSessions.size).toBe(0);
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it("restores legacy SFU announcements without requiring a native payload", async () => {
+    await signal(0, "");
+    const { result } = renderHook(() => useScreenShare());
+    await act(async () => {});
+    expect(result.current.broadcastingSessions.has(42)).toBe(true);
+    expect(send).toHaveBeenCalledWith(42, 2, "sfu-offer", "server-a");
+  });
+
+  it("does not show another server's cached broadcasts", async () => {
+    await signal(0, "", "server-b");
+    const { result } = renderHook(() => useScreenShare());
+    expect(result.current.broadcastingSessions.size).toBe(0);
+    expect(send).not.toHaveBeenCalled();
+    await act(async () => { useAppStore.setState({ activeServerId: "server-b" }); });
+    expect(result.current.broadcastingSessions.has(42)).toBe(true);
+    expect(send).toHaveBeenCalledWith(42, 2, "sfu-offer", "server-b");
+  });
+
+  it("reports actual connected route, resets on SFU fallback and clears after STOP", async () => {
+    const { result } = renderHook(() => { useScreenShare(); return useRemoteConnectionStats(42); });
+    await signal(0, JSON.stringify({ native: true, p2p: true, sfuAvailable: true }));
+    expect(result.current.route).toBe("connecting");
+    await signal(5, "direct-offer");
+    expect(result.current.route).toBe("connecting");
+    const direct = Peer.instances[0];
+    direct.connectionState = "connected";
+    direct.onconnectionstatechange?.();
+    direct.getStats.mockResolvedValue(new Map([["video", { id: "video", type: "inbound-rtp", kind: "video", timestamp: 1000, bytesReceived: 100 }]]));
+    await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+    expect(result.current.route).toBe("p2p");
+    direct.getStats.mockResolvedValue(new Map([["video", { id: "video", type: "inbound-rtp", kind: "video", timestamp: 2000, bytesReceived: 1100 }]]));
+    await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+    expect(result.current.bitrateKbps).toBe(8);
+    await signal(9);
+    await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+    expect(result.current).toEqual({ route: "connecting", rttMs: null, bitrateKbps: null });
+    const sfu = Peer.instances[1];
+    sfu.connectionState = "connected";
+    sfu.onconnectionstatechange?.();
+    await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+    expect(result.current.route).toBe("sfu");
+    await signal(1);
+    await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+    expect(result.current).toEqual({ route: "connecting", rttMs: null, bitrateKbps: null });
+  });
+
+  it("ignores a late stats response after a server switch and stops polling on unmount", async () => {
+    const { result, unmount } = renderHook(() => { useScreenShare(); return useRemoteConnectionStats(42); });
+    await signal(0, JSON.stringify({ native: true, p2p: true, sfuAvailable: true }));
+    await signal(5, "direct-offer");
+    const pc = Peer.instances[0];
+    pc.connectionState = "connected";
+    pc.onconnectionstatechange?.();
+    let resolve!: (stats: Map<string, unknown>) => void;
+    pc.getStats.mockImplementationOnce(() => new Promise(r => { resolve = r; }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+    await act(async () => { useAppStore.setState({ activeServerId: "server-b" }); });
+    await act(async () => { resolve(new Map()); });
+    expect(result.current.route).toBe("connecting");
+    unmount();
+    const calls = pc.getStats.mock.calls.length;
+    await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
+    expect(pc.getStats.mock.calls.length).toBe(calls);
+  });
+
   it("waits for broadcaster admission and queues ICE until the offer arrives", async () => {
     renderHook(() => useScreenShare());
     await signal(0, JSON.stringify({ native: true, p2p: true, sfuAvailable: true }));

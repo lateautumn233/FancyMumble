@@ -172,7 +172,7 @@ impl Connection {
         .await
     }
 
-    async fn with_ice_servers(
+    pub(crate) async fn with_ice_servers(
         codec: Codec,
         fps: u32,
         handler: Arc<dyn webrtc::peer_connection::PeerConnectionEventHandler>,

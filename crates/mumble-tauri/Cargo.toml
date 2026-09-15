@@ -114,6 +114,7 @@ windows-sys = { version = "0.61", features = [
     "Win32_UI_WindowsAndMessaging",
     "Win32_UI_Shell",
     "Win32_Graphics_Gdi",
+    "Win32_Graphics_Dwm",
     "Win32_System_Threading",
 ] }
 # WebView2 COM bindings for ICoreWebView2_19::SetMemoryUsageTargetLevel

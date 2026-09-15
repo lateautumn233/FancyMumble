@@ -282,17 +282,15 @@ export default function ChatHeader({
             <FolderIcon width={18} height={18} />
           </button>
         )}
-        {onToggleScreenShare && !privateBadge && !broadcastInfo?.isOwnBroadcast && (
+        {onToggleScreenShare && !privateBadge && (
           <button
             className={`${styles.serverInfoBtn} ${isScreenSharing ? styles.screenShareActive : ""}`}
             onClick={onToggleScreenShare}
-            disabled={!!screenShareDisabledReason}
+            disabled={!isScreenSharing && !!screenShareDisabledReason}
             aria-label={isScreenSharing ? t("header.stopSharing") : t("header.shareScreen")}
             title={
-              screenShareDisabledReason ?? (
-                isScreenSharing
-                  ? t("header.stopSharing")
-                  : sfuAvailable
+              isScreenSharing ? t("header.stopSharing") : screenShareDisabledReason ?? (
+                  sfuAvailable
                     ? t("header.shareScreenRelayed")
                     : t("header.shareScreenP2P")
               )

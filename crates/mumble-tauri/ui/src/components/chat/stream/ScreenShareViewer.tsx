@@ -10,10 +10,13 @@ import { CloseIcon, EditIcon, ErrorCircleIcon, FullscreenExitIcon, FullscreenIco
  */
 import DrawingOverlay from "../drawing/DrawingOverlay";
 import { useRef, useEffect, useMemo, useState, useCallback } from "react";
-import { useTranslation } from "react-i18next";
+import { Trans, useTranslation } from "react-i18next";
 import { invoke } from "@tauri-apps/api/core";
 import { useAppStore } from "../../../store";
-import { useRemoteStream } from "./useScreenShare";
+import { useRemoteConnectionStats, useRemoteStream } from "./useScreenShare";
+import { StreamConnectionStats } from "./StreamConnectionStats";
+import { useNativeBroadcast } from "./nativeBroadcast";
+import { NativePreview } from "./NativePreview";
 import styles from "./ScreenShareViewer.module.css";
 
 // ---------------------------------------------------------------------------
@@ -343,6 +346,7 @@ function RemoteViewer({ session, channelId, ownSession }: { readonly session: nu
   const videoRef = useRef<HTMLVideoElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const remoteStream = useRemoteStream(session);
+  const connectionStats = useRemoteConnectionStats(session);
   const broadcaster = useAppStore((s) => s.users.find((u) => u.session === session));
   const activeServerId = useAppStore((s) => s.activeServerId);
   const { t } = useTranslation(["chat", "common"]);
@@ -373,6 +377,7 @@ function RemoteViewer({ session, channelId, ownSession }: { readonly session: nu
 
   return (
     <div ref={containerRef} className={styles.streamViewport}>
+      <StreamConnectionStats stats={connectionStats} />
       {!remoteStream && (
         <div className={styles.streamPlaceholder}>
           <ScreenShareIcon className={styles.streamPlaceholderIcon} />
@@ -425,9 +430,12 @@ export default function ScreenShareViewer({
   channelId = 0,
   ownSession = 0,
 }: ScreenShareViewerProps) {
+  const native = useNativeBroadcast((s) => s.broadcast);
   return (
     <div className={styles.broadcastArea}>
-      {isOwnBroadcast && localStream
+      {isOwnBroadcast && native?.status
+        ? <NativePreview status={native.status} />
+        : isOwnBroadcast && localStream
         ? <OwnBroadcastPreview stream={localStream} channelId={channelId} ownSession={ownSession} />
         : <RemoteViewer session={session ?? 0} channelId={channelId} ownSession={ownSession} />}
     </div>
@@ -510,7 +518,13 @@ export function BroadcastBanner({ broadcasters, onWatch, sfuAvailable = true }: 
         >
           <span className={`${styles.broadcastBannerDot} ${!sfuAvailable ? styles.broadcastBannerDotP2P : ""}`} />
           <span className={styles.broadcastBannerText}>
-            <span className={styles.broadcastBannerName}>{b.name}</span> {t("screenShare.banner.isSharingScreen")}
+            <Trans
+              t={t}
+              i18nKey="screenShare.banner.isSharingScreen"
+              components={{
+                broadcaster: <span className={styles.broadcastBannerName}>{b.name}</span>,
+              }}
+            />
           </span>
           {!sfuAvailable && (
             <span className={styles.broadcastBannerP2PLabel} title={t("screenShare.p2pTooltip")}>

@@ -39,6 +39,7 @@ pub(super) struct Config {
     pub(super) fps: u32,
     pub(super) client: ClientHandle,
     pub(super) events: mpsc::Sender<Event>,
+    pub(super) preview: Option<tauri::ipc::Channel<serde_json::Value>>,
 }
 
 enum Local {
@@ -74,12 +75,23 @@ pub(super) fn spawn(config: Config, frames: broadcast::Receiver<Arc<EncodedFrame
     let id = config.id;
     let task = tokio::spawn(async move {
         let (local_tx, local_rx) = mpsc::channel(64);
-        let create = Connection::new(
-            config.codec,
-            config.fps,
-            Arc::new(Handler(local_tx)),
-            Arc::new(webrtc::runtime::TokioRuntime),
-        );
+        let create = async {
+            let handler = Arc::new(Handler(local_tx));
+            let runtime = Arc::new(webrtc::runtime::TokioRuntime);
+            if config.preview.is_some() {
+                Connection::with_ice_servers(
+                    config.codec,
+                    config.fps,
+                    handler,
+                    runtime,
+                    vec![],
+                    vec!["127.0.0.1:0".to_owned()],
+                )
+                .await
+            } else {
+                Connection::new(config.codec, config.fps, handler, runtime).await
+            }
+        };
         let result = tokio::select! {
             () = token.cancelled() => return,
             result = tokio::time::timeout(Duration::from_secs(20), create) => result,
@@ -97,6 +109,12 @@ pub(super) fn spawn(config: Config, frames: broadcast::Receiver<Arc<EncodedFrame
             Err(_) => Err("WebRTC creation timed out".to_owned()),
         };
         if !token.is_cancelled() {
+            if let Some(channel) = &config.preview {
+                let _ = channel.send(serde_json::json!({
+                    "kind": "error", "payload": outcome.err().unwrap_or_else(|| "Preview connection closed".to_owned()),
+                }));
+                return;
+            }
             let _ = config.events.try_send(Event::PeerEnded {
                 target: config.target,
                 id,
@@ -197,6 +215,11 @@ impl Config {
         direct: SignalType,
         payload: String,
     ) -> Result<(), String> {
+        if let Some(channel) = &self.preview {
+            return channel.send(serde_json::json!({
+                "kind": if sfu == SignalType::SdpOffer { "offer" } else { "ice" }, "payload": payload,
+            })).map_err(|e| format!("preview signaling failed: {e}"));
+        }
         send_signal(
             &self.client,
             Signal {

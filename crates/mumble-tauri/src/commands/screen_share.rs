@@ -13,6 +13,81 @@ use crate::media::encoder::{self, EncoderReport, Selection};
 use crate::media::settings::{OutputSize, ResolvedEncoding, ScreenShareSettings};
 use crate::media::transport::{Allocator, SfuReason};
 
+/// Negotiate or close the local-only preview of an existing broadcast.
+#[tauri::command]
+pub(crate) fn native_screen_share_preview(
+    state: tauri::State<'_, crate::state::AppState>,
+    server_id: String,
+    broadcast_id: String,
+    preview_id: String,
+    action: String,
+    payload: Option<String>,
+    channel: tauri::ipc::Channel<serde_json::Value>,
+) -> Result<(), String> {
+    #[cfg(not(target_os = "android"))]
+    {
+        use crate::media::broadcast::PreviewAction;
+        let _ = uuid::Uuid::parse_str(&preview_id).map_err(|_| "Invalid preview id")?;
+        let payload = payload.unwrap_or_default();
+        if payload.len() > 128 * 1024 {
+            return Err("Preview signal too large".to_owned());
+        }
+        let action = match action.as_str() {
+            "start" => PreviewAction::Start(channel),
+            "answer" => PreviewAction::Answer(payload),
+            "ice" => PreviewAction::Ice(payload),
+            "stop" => PreviewAction::Stop,
+            _ => return Err("Invalid preview action".to_owned()),
+        };
+        state.native_screen_share_preview(&server_id, &broadcast_id, preview_id, action)
+    }
+    #[cfg(target_os = "android")]
+    {
+        let _ = (
+            state,
+            server_id,
+            broadcast_id,
+            preview_id,
+            action,
+            payload,
+            channel,
+        );
+        Err("Native preview is unavailable on Android".to_owned())
+    }
+}
+
+/// Cheap capability check without running encoder probes.
+#[tauri::command]
+pub(crate) fn native_screen_share_available() -> bool {
+    cfg!(all(target_os = "windows", feature = "native-screenshare"))
+}
+
+/// Validate persisted defaults through the same model used when starting capture.
+#[tauri::command]
+pub(crate) fn validate_screen_share_settings(
+    settings: ScreenShareSettings,
+) -> Result<ScreenShareSettings, String> {
+    settings.validate()?;
+    Ok(settings)
+}
+
+/// Enumerate native sources without starting capture.
+#[tauri::command]
+pub(crate) async fn list_screen_share_sources() -> Result<serde_json::Value, String> {
+    #[cfg(all(target_os = "windows", feature = "native-screenshare"))]
+    {
+        tokio::task::spawn_blocking(|| {
+            serde_json::to_value(crate::media::sources::enumerate()?).map_err(|e| e.to_string())
+        })
+        .await
+        .map_err(|e| format!("source enumeration failed: {e}"))?
+    }
+    #[cfg(not(all(target_os = "windows", feature = "native-screenshare")))]
+    {
+        Err("native screen sharing is unavailable in this build".to_owned())
+    }
+}
+
 /// Start native capture and WebRTC transport on the selected server.
 #[tauri::command]
 pub(crate) async fn start_native_screen_share(
@@ -23,8 +98,11 @@ pub(crate) async fn start_native_screen_share(
 ) -> Result<serde_json::Value, String> {
     #[cfg(not(target_os = "android"))]
     {
-        let request = serde_json::from_value(request).map_err(|e| format!("invalid screen-share request: {e}"))?;
-        let status = state.start_native_screen_share(app, request, server_id).await?;
+        let request = serde_json::from_value(request)
+            .map_err(|e| format!("invalid screen-share request: {e}"))?;
+        let status = state
+            .start_native_screen_share(app, request, server_id)
+            .await?;
         serde_json::to_value(status).map_err(|e| e.to_string())
     }
     #[cfg(target_os = "android")]
@@ -41,9 +119,14 @@ pub(crate) async fn stop_native_screen_share(
     server_id: Option<String>,
 ) -> Result<(), String> {
     #[cfg(not(target_os = "android"))]
-    { state.stop_native_screen_share(server_id).await }
+    {
+        state.stop_native_screen_share(server_id).await
+    }
     #[cfg(target_os = "android")]
-    { let _ = (state, server_id); Ok(()) }
+    {
+        let _ = (state, server_id);
+        Ok(())
+    }
 }
 
 /// Read native broadcast status without depending on the current UI tab.
@@ -53,9 +136,15 @@ pub(crate) fn native_screen_share_status(
     server_id: Option<String>,
 ) -> Result<serde_json::Value, String> {
     #[cfg(not(target_os = "android"))]
-    { serde_json::to_value(state.native_screen_share_status(server_id)?).map_err(|e| e.to_string()) }
+    {
+        serde_json::to_value(state.native_screen_share_status(server_id)?)
+            .map_err(|e| e.to_string())
+    }
     #[cfg(target_os = "android")]
-    { let _ = (state, server_id); Ok(serde_json::Value::Null) }
+    {
+        let _ = (state, server_id);
+        Ok(serde_json::Value::Null)
+    }
 }
 
 /// List the video encoders on this machine, with availability.
@@ -90,11 +179,7 @@ pub(crate) fn default_screen_share_settings() -> ScreenShareSettings {
 ///
 /// Shown next to the manual bit-rate input as a reference figure.
 #[tauri::command]
-pub(crate) fn suggested_screen_share_bitrate(
-    width: u32,
-    height: u32,
-    fps: u32,
-) -> u32 {
+pub(crate) fn suggested_screen_share_bitrate(width: u32, height: u32, fps: u32) -> u32 {
     crate::media::settings::suggested_bitrate_kbps(OutputSize { width, height }, fps)
 }
 
@@ -167,7 +252,11 @@ pub(crate) async fn resolve_screen_share_encoding(
         );
     }
 
-    Ok(ResolvedScreenShare { encoding, encoder, transport })
+    Ok(ResolvedScreenShare {
+        encoding,
+        encoder,
+        transport,
+    })
 }
 
 /// Work out how viewers will be served, given the settings and the server.
@@ -175,10 +264,7 @@ pub(crate) async fn resolve_screen_share_encoding(
 /// A server that does not advertise `webrtc_p2p_relay_available` cannot carry
 /// the P2P signal types at all, so its answer overrides whatever the user
 /// asked for (see `TODO.md` 3.0).
-fn plan_transport(
-    settings: &ScreenShareSettings,
-    state: &crate::state::AppState,
-) -> TransportPlan {
+fn plan_transport(settings: &ScreenShareSettings, state: &crate::state::AppState) -> TransportPlan {
     let allocator = Allocator::new(settings, state.server_relays_p2p());
     TransportPlan {
         direct_slots: allocator.free_slots(),

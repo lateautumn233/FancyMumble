@@ -12,6 +12,29 @@ use super::{types::ConnectionStatus, AppState, SharedState};
 use crate::media::broadcast::{self, Context, Event, StartRequest, Status};
 
 impl AppState {
+    pub(crate) fn native_screen_share_preview(
+        &self,
+        server_id: &str,
+        broadcast_id: &str,
+        id: String,
+        action: broadcast::PreviewAction,
+    ) -> Result<(), String> {
+        let session = self.screen_share_session(Some(server_id))?;
+        let state = session.lock().map_err(|e| e.to_string())?;
+        let handle = state
+            .native_broadcast
+            .as_ref()
+            .ok_or("No active screen share")?;
+        let status = handle.status.borrow();
+        if !status.running || status.broadcast_id != broadcast_id {
+            return Err("Screen share has ended or changed".to_owned());
+        }
+        handle
+            .events
+            .try_send(Event::Preview { id, action })
+            .map_err(|e| format!("Preview signaling unavailable: {e}"))
+    }
+
     fn screen_share_session(
         &self,
         server_id: Option<&str>,

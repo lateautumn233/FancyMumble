@@ -29,6 +29,7 @@ pub(crate) enum CaptureSource {
         /// orders them - which is exactly what `ddagrab`'s `output_idx` means.
         output_index: u32,
         /// The `HMONITOR` for the same display, for `gfxcapture`.
+        #[serde(deserialize_with = "deserialize_handle")]
         hmonitor: u64,
     },
     /// A single window, by handle.  `gfxcapture` only.
@@ -41,8 +42,22 @@ pub(crate) enum CaptureSource {
         /// window it finds, which for a multi-window process like a browser
         /// is often a hidden one that never repaints, and the capture then
         /// simply never produces a frame (`TODO.md` 0.7).
+        #[serde(deserialize_with = "deserialize_handle")]
         hwnd: u64,
     },
+}
+
+fn deserialize_handle<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<u64, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Handle {
+        Text(String),
+        Number(u64),
+    }
+    match Handle::deserialize(deserializer)? {
+        Handle::Text(value) => value.parse().map_err(serde::de::Error::custom),
+        Handle::Number(value) => Ok(value),
+    }
 }
 
 impl CaptureSource {
@@ -347,6 +362,18 @@ mod tests {
     const QHD: OutputSize = OutputSize { width: 2560, height: 1440 };
 
     const MONITOR: CaptureSource = CaptureSource::Monitor { output_index: 0, hmonitor: 0x1234 };
+    #[test]
+    fn picker_handles_preserve_all_bits_and_accept_legacy_numbers() -> Result<(), serde_json::Error>
+    {
+        let source: CaptureSource =
+            serde_json::from_str(r#"{"kind":"window","hwnd":"18446744073709551615"}"#)?;
+        assert_eq!(source, CaptureSource::Window { hwnd: u64::MAX });
+        let legacy: CaptureSource = serde_json::from_str(r#"{"kind":"window","hwnd":1234}"#)?;
+        assert_eq!(legacy, CaptureSource::Window { hwnd: 1234 });
+        assert!(serde_json::from_str::<CaptureSource>(r#"{"kind":"window","hwnd":"-1"}"#).is_err());
+        Ok(())
+    }
+
     const WINDOW: CaptureSource = CaptureSource::Window { hwnd: 0xABCD };
 
     fn request(backend: CaptureBackend, input: EncoderInput, target: OutputSize) -> ChainRequest {

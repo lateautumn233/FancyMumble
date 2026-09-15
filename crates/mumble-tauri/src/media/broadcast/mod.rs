@@ -61,6 +61,8 @@ pub(crate) struct Status {
 
 /// Commands and connection feedback serialized by the broadcast owner.
 pub(crate) enum Event {
+    /// Local preview signaling never traverses the server or consumes a slot.
+    Preview { id: String, action: PreviewAction },
     /// Incoming signal on the owning Mumble connection.
     Signal {
         sender: u32,
@@ -75,6 +77,13 @@ pub(crate) enum Event {
     },
     /// Receiver feedback or frame queue overflow requires a new key frame.
     KeyFrame,
+}
+
+pub(crate) enum PreviewAction {
+    Start(tauri::ipc::Channel<serde_json::Value>),
+    Answer(String),
+    Ice(String),
+    Stop,
 }
 
 /// Per-session handle. Dropping it always requests cleanup.
@@ -154,6 +163,7 @@ pub(crate) fn spawn(
             status,
             cancel,
             peers: HashMap::new(),
+            preview: None,
             members: HashSet::new(),
             next_peer: 0,
             key_requested: false,
@@ -185,6 +195,7 @@ struct Owner {
     status: watch::Sender<Status>,
     cancel: CancellationToken,
     peers: HashMap<u32, peer::Peer>,
+    preview: Option<(String, peer::Peer)>,
     members: HashSet<u32>,
     next_peer: u64,
     key_requested: bool,
@@ -281,6 +292,7 @@ impl Owner {
             fps,
             client: self.context.client.clone(),
             events: self.events.clone(),
+            preview: None,
         };
         let _ = self
             .peers
@@ -295,6 +307,45 @@ impl Owner {
         frames: &broadcast::Sender<Arc<frame::EncodedFrame>>,
     ) -> Result<(), String> {
         match event {
+            Event::Preview { id, action } => match action {
+                PreviewAction::Start(channel) => {
+                    self.stop_preview().await;
+                    self.next_peer += 1;
+                    let config = peer::Config {
+                        target: self.context.own_session,
+                        id: self.next_peer,
+                        codec,
+                        fps,
+                        client: self.context.client.clone(),
+                        events: self.events.clone(),
+                        preview: Some(channel),
+                    };
+                    self.preview = Some((id, peer::spawn(config, frames.subscribe())));
+                }
+                PreviewAction::Stop => {
+                    if self
+                        .preview
+                        .as_ref()
+                        .is_some_and(|(current, _)| current == &id)
+                    {
+                        self.stop_preview().await;
+                    }
+                }
+                action => {
+                    if let Some((current, peer)) = &self.preview {
+                        if current == &id {
+                            let input = match action {
+                                PreviewAction::Answer(sdp) => peer::Input::Answer(sdp),
+                                PreviewAction::Ice(candidate) => peer::Input::Ice(candidate),
+                                _ => unreachable!(),
+                            };
+                            if peer.input.try_send(input).is_err() {
+                                peer.cancel.cancel();
+                            }
+                        }
+                    }
+                }
+            },
             Event::KeyFrame => self.key_requested = true,
             Event::PeerEnded { target, id, error } => {
                 if self.peers.get(&target).is_none_or(|peer| peer.id != id) {
@@ -467,6 +518,7 @@ impl Owner {
     }
 
     async fn shutdown(&mut self) {
+        self.stop_preview().await;
         for peer in self.peers.values() {
             peer.cancel.cancel();
         }
@@ -491,5 +543,12 @@ impl Owner {
             .context
             .app
             .emit("native-screen-share-state", self.status.borrow().clone());
+    }
+
+    async fn stop_preview(&mut self) {
+        if let Some((_, peer)) = self.preview.take() {
+            peer.cancel.cancel();
+            let _ = peer.task.await;
+        }
     }
 }

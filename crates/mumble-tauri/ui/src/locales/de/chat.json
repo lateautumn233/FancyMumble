@@ -271,6 +271,11 @@
     "readByEveryone": "Von allen gelesen"
   },
   "screenShare": {
+    "connectionStats": "Verbindungsstatistik",
+    "rtt": "Netzwerk-Roundtrip-Zeit (RTT)",
+    "receiveBitrate": "Video-Empfangsbitrate",
+    "route": { "connecting": "Medienverbindung wird hergestellt", "p2p": "Direkte Verbindung zum Sender", "sfu": "Video wird vom Server weitergeleitet" },
+    "preview": "Vorschau",
     "alreadySharingOtherServer": "Du teilst deinen Bildschirm bereits auf einem anderen Server. Beende diese Freigabe zuerst.",
     "mute": "Stummschalten",
     "unmute": "Stummschaltung aufheben",
@@ -294,7 +299,7 @@
     "p2pLabel": "P2P",
     "p2pTooltip": "Kein SFU auf diesem Server - der Stream läuft direkt zwischen den Teilnehmern",
     "banner": {
-      "isSharingScreen": "{{name}} teilt den Bildschirm",
+      "isSharingScreen": "<broadcaster/> teilt den Bildschirm",
       "watch": "Ansehen",
       "dismiss": "Benachrichtigung verwerfen"
     }

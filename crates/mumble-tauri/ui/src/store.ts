@@ -9,6 +9,8 @@ import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { reconnectDelayMs } from "./utils/reconnectBackoff";
+import { dispatchWebRtcSignal, forgetBroadcasts } from "./components/chat/stream/screenShareSignals";
+export { onWebRtcSignal } from "./components/chat/stream/screenShareSignals";
 import {
   isPermissionGranted,
   requestPermission,
@@ -1189,6 +1191,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       intentionallyClosingSessions.delete(id);
       throw e;
     }
+    forgetBroadcasts(id);
     // Drop the cached error for the closed session.
     set((prev) => {
       if (prev.sessionErrors[id] == null) return prev;
@@ -1299,6 +1302,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       console.error("disconnect error:", e);
     }
     resetReactions();
+    forgetBroadcasts(null);
     clearReadReceipts();
     useOnboardingStore.getState().clear();
     set({ ...INITIAL });
@@ -1515,6 +1519,8 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   refreshState: async () => {
     try {
+      const previousServerId = get().activeServerId;
+      const previousUsers = get().users;
       const [channels, users, pushSubscribed] = await Promise.all([
         invoke<ChannelEntry[]>("get_channels"),
         invoke<UserEntry[]>("get_users"),
@@ -1542,6 +1548,11 @@ export const useAppStore = create<AppState>((set, get) => ({
 
       // Clean up broadcastingSessions for users that are no longer connected.
       const currentSessions = new Set(users.map((u) => u.session));
+      if (get().activeServerId === previousServerId) {
+        forgetBroadcasts(previousServerId, previousUsers
+          .filter((u) => !currentSessions.has(u.session))
+          .map((u) => u.session));
+      }
       const { broadcastingSessions } = get();
       if (broadcastingSessions.size > 0) {
         const pruned = new Set([...broadcastingSessions].filter((s) => currentSessions.has(s)));
@@ -2682,20 +2693,6 @@ export function onPluginData(handler: PluginDataHandler): () => void {
   };
 }
 
-// --- WebRTC signal handler registry ---
-
-type WebRtcSignalHandler = (senderSession: number | null, targetSession: number | null, signalType: number, payload: string, serverId: string | null) => void;
-const webRtcSignalHandlers: WebRtcSignalHandler[] = [];
-
-/** Register a handler for incoming WebRTC screen-sharing signals. */
-export function onWebRtcSignal(handler: WebRtcSignalHandler): () => void {
-  webRtcSignalHandlers.push(handler);
-  return () => {
-    const idx = webRtcSignalHandlers.indexOf(handler);
-    if (idx >= 0) webRtcSignalHandlers.splice(idx, 1);
-  };
-}
-
 /** Set of request_ids already sent to avoid duplicate requests. */
 const pendingPreviewRequests = new Set<string>();
 
@@ -2864,6 +2861,17 @@ export async function initEventListeners(
 ): Promise<UnlistenFn[]> {
   navigateRef = navigate;
   const unlisteners: UnlistenFn[] = [];
+
+  // Subscribe before asynchronous bootstrap so a late-join START cannot be lost.
+  unlisteners.push(
+    await listen<{ sender_session: number | null; target_session: number | null; signal_type: number; payload: string; serverId?: string | null }>(
+      TauriEvent.WebrtcSignal,
+      (event) => {
+        const { sender_session, target_session, signal_type, payload } = event.payload;
+        dispatchWebRtcSignal(sender_session, target_session, signal_type, payload, event.payload.serverId ?? null);
+      },
+    ),
+  );
 
   // Bootstrap the multi-server session list once at startup so the
   // sessions slice reflects whatever the backend already has.  When the
@@ -3182,6 +3190,7 @@ export async function initEventListeners(
         const eventServerId = typeof payload === "object" && payload !== null
           ? (payload.serverId ?? null)
           : null;
+        forgetBroadcasts(eventServerId);
         const eventReason = typeof payload === "string"
           ? payload
           : (typeof payload === "object" && payload !== null ? payload.reason : null);
@@ -3671,21 +3680,6 @@ export async function initEventListeners(
       registerVote(vote);
       useAppStore.setState({});
     }),
-  );
-
-  // -- WebRTC signal events ----------------------------------------
-
-  unlisteners.push(
-    await listen<{ sender_session: number | null; target_session: number | null; signal_type: number; payload: string; serverId?: string | null }>(
-      TauriEvent.WebrtcSignal,
-      (event) => {
-        const { sender_session, target_session, signal_type, payload } = event.payload;
-        const serverId = event.payload.serverId ?? null;
-        for (const handler of webRtcSignalHandlers) {
-          handler(sender_session, target_session, signal_type, payload, serverId);
-        }
-      },
-    ),
   );
 
   // -- Link preview response events --------------------------------

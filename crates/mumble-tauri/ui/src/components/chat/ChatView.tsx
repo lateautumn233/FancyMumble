@@ -47,6 +47,9 @@ import { isMobile } from "../../utils/platform";
 import { htmlToMarkdown } from "./markdown/MarkdownInput";
 import type { MessageScope } from "../../messageOffload";
 import { useScreenShare } from "./stream/useScreenShare";
+import { ScreenShareSetupDialog } from "./stream/ScreenShareSetupDialog";
+import { SharingToolbar } from "./stream/SharingToolbar";
+import { restoreNativeBroadcast, startNativeBroadcast, type ShareContext } from "./stream/nativeBroadcast";
 const ScreenShareViewer = lazy(() => import("./stream/ScreenShareViewer"));
 const BroadcastBanner = lazy(() =>
   import("./stream/ScreenShareViewer").then((m) => ({ default: m.BroadcastBanner })),
@@ -137,7 +140,7 @@ function findPopOutImageSrc(body: string): string | null {
 }
 
 export default function ChatView({ onChannelInfoToggle, onChannelSearch, scrollToMessageId, onScrollConsumed, inPopout = false }: ChatViewProps) {
-  const { t } = useTranslation("chat");
+  const { t } = useTranslation(["chat", "settings"]);
   const channels = useAppStore((s) => s.channels);
   const users = useAppStore((s) => s.users);
   const selectedChannel = useAppStore((s) => s.selectedChannel);
@@ -910,6 +913,28 @@ export default function ChatView({ onChannelInfoToggle, onChannelSearch, scrollT
   } = useReactions();
 
   const screenShare = useScreenShare();
+  const [nativeShareAvailable, setNativeShareAvailable] = useState<boolean | null>(null);
+  const [shareSetup, setShareSetup] = useState<ShareContext | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    invoke<boolean>("native_screen_share_available")
+      .then((available) => { if (!cancelled) setNativeShareAvailable(available); })
+      .catch(() => { if (!cancelled) setNativeShareAvailable(false); });
+    return () => { cancelled = true; };
+  }, []);
+  useEffect(() => {
+    if (!nativeShareAvailable || !activeServerId || ownSession === null) return;
+    const channelId = useAppStore.getState().currentChannel;
+    if (channelId === null) return;
+    void restoreNativeBroadcast({ serverId: activeServerId, ownSession, channelId }).catch(console.error);
+  }, [nativeShareAvailable, activeServerId, ownSession]);
+  const openShareSetup = () => {
+    if (!nativeShareAvailable) { void screenShare.startSharing(); return; }
+    const state = useAppStore.getState();
+    if (state.activeServerId && state.ownSession !== null && state.currentChannel !== null) {
+      setShareSetup({ serverId: state.activeServerId, ownSession: state.ownSession, channelId: state.currentChannel });
+    }
+  };
 
   // Determine which screen share panel to show (own broadcast or watching someone).
   // watchingSession takes priority: a broadcaster can watch another stream.
@@ -918,6 +943,7 @@ export default function ChatView({ onChannelInfoToggle, onChannelSearch, scrollT
   // for the same broadcaster.  When the popout closes, the popped-out set
   // clears and the in-chat viewer (or banner) reappears automatically.
   const poppedOutStreamSessions = useAppStore((s) => s.poppedOutStreamSessions);
+  const [ownPreviewVisible, setOwnPreviewVisible] = useState(true);
   let activeScreenShare: { session: number; isOwn: boolean; stream: MediaStream | null } | null = null;
   if (screenShare.watchingSession !== null
       && !poppedOutStreamSessions.has(screenShare.watchingSession)) {
@@ -943,7 +969,7 @@ export default function ChatView({ onChannelInfoToggle, onChannelSearch, scrollT
   // Using a single instance keeps layout state stable across swap transitions.
   const showFocusView = activeScreenShare !== null && (
     !activeScreenShare.isOwn || channelBroadcasters.length > 0
-  );
+  ) && (!activeScreenShare.isOwn || ownPreviewVisible);
 
   // Secondary panels for the unified focus view.
   const focusViewSecondaries = useMemo(() => {
@@ -999,6 +1025,7 @@ export default function ChatView({ onChannelInfoToggle, onChannelSearch, scrollT
   if (selectedChannel === null && !isDmMode) {
     return (
       <main className={styles.main}>
+        <SharingToolbar onStop={screenShare.stopSharing} previewVisible={ownPreviewVisible} onPreviewChange={setOwnPreviewVisible} />
         <div className={styles.empty}>
           <div className={styles.emptyIcon}><MessageCircleIcon width={40} height={40} /></div>
           <p>{t("page.selectChannel")}</p>
@@ -1042,11 +1069,13 @@ export default function ChatView({ onChannelInfoToggle, onChannelSearch, scrollT
           isScreenSharing={screenShare.isBroadcasting}
           onToggleScreenShare={
             !inPopout && !isMobile && serverFancyVersion != null && serverFancyVersion >= SCREEN_SHARE_MIN_VERSION
-              ? (screenShare.isBroadcasting ? screenShare.stopSharing : screenShare.startSharing)
+              ? (screenShare.isBroadcasting ? screenShare.stopSharing : openShareSetup)
               : undefined
           }
           screenShareDisabledReason={
-            screenShare.isBroadcastingFromOtherTab
+            nativeShareAvailable === null
+              ? t("settings:screenShare.loading")
+              : screenShare.isBroadcastingFromOtherTab
               ? t("screenShare.alreadySharingOtherServer")
               : undefined
           }
@@ -1062,6 +1091,9 @@ export default function ChatView({ onChannelInfoToggle, onChannelSearch, scrollT
         />
         )
       )}
+
+      <SharingToolbar onStop={screenShare.stopSharing} previewVisible={ownPreviewVisible} onPreviewChange={setOwnPreviewVisible} />
+      {shareSetup && <ScreenShareSetupDialog context={shareSetup} onClose={() => setShareSetup(null)} onStart={startNativeBroadcast} />}
 
       {showPinnedPanel && (
         <ResizableSplitPanel
@@ -1160,7 +1192,7 @@ export default function ChatView({ onChannelInfoToggle, onChannelSearch, scrollT
       )}
 
       {/* Solo own broadcast preview (no other broadcasters) */}
-      {activeScreenShare?.isOwn && activeScreenShare.stream && !showFocusView && (
+      {activeScreenShare?.isOwn && ownPreviewVisible && !showFocusView && (
         <ResizableSplitPanel
           fillByDefault
           minPx={200}

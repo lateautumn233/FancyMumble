@@ -1,5 +1,72 @@
 /* --- Screen Share Viewer ----------------------------------------- */
 
+.viewerStats {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 6;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 12px;
+  max-width: calc(100% - 56px);
+  padding: 5px 8px;
+  border-radius: 4px;
+  background: #111d;
+  color: #fff;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  line-height: 18px;
+}
+.viewerStats > span { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
+.statsSpinner { animation: statsSpin 1s linear infinite; }
+@keyframes statsSpin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .statsSpinner { animation: none; } }
+
+.sharingToolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  flex-shrink: 0;
+  gap: 10px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--color-glass-border);
+  background: var(--color-bg-secondary);
+  color: var(--color-text-primary);
+  font-size: 13px;
+}
+
+.sharingSource { flex: 1 1 120px; min-width: 0; overflow-wrap: anywhere; }
+.previewToggle { display: flex; align-items: center; gap: 5px; white-space: nowrap; }
+.stopSharingButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 34px;
+  padding: 6px 10px;
+  border: 1px solid #b52c3b;
+  border-radius: 6px;
+  background: #a52332;
+  color: #fff;
+  font: inherit;
+  cursor: pointer;
+}
+.stopSharingButton:disabled { opacity: 0.6; cursor: wait; }
+.sharingError { flex-basis: 100%; color: var(--color-text-primary); overflow-wrap: anywhere; }
+.previewStatus {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 20px;
+  background: #000b;
+  color: #fff;
+  overflow-wrap: anywhere;
+}
+
 .broadcastArea {
   display: flex;
   flex-direction: column;

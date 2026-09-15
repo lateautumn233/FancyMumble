@@ -830,12 +830,16 @@ macro_rules! all_command_handlers {
             commands::draw_overlay::take_drawing_overlay_context,
             commands::window::set_window_aspect_ratio,
             commands::screen_share::list_video_encoders,
+            commands::screen_share::native_screen_share_available,
+            commands::screen_share::validate_screen_share_settings,
+            commands::screen_share::list_screen_share_sources,
             commands::screen_share::default_screen_share_settings,
             commands::screen_share::suggested_screen_share_bitrate,
             commands::screen_share::resolve_screen_share_encoding,
             commands::screen_share::start_native_screen_share,
             commands::screen_share::stop_native_screen_share,
             commands::screen_share::native_screen_share_status,
+            commands::screen_share::native_screen_share_preview,
             #[cfg(not(target_os = "android"))]
             updater::commands::updater_check,
             #[cfg(not(target_os = "android"))]

@@ -30,6 +30,9 @@ import {
   storeLocalThumbnail,
 } from "../stream/useStreamPreview";
 import { clearAllStrokesInChannel, clearStrokesFromSender } from "../drawing/DrawingOverlay";
+import { stopNativeBroadcast, useNativeBroadcast } from "./nativeBroadcast";
+import { CONNECTING_STATS, readViewerStats, type VideoSamples, type ViewerConnectionStats } from "./viewerStats";
+import { announcedBroadcasts } from "./screenShareSignals";
 
 // This module holds singleton WebRTC state (broadcasterPc, viewerPcs, etc.).
 // Vite HMR would otherwise hot-swap the module while leaving stale closures
@@ -702,6 +705,8 @@ export interface ScreenShareHook {
 }
 
 export function useScreenShare(): ScreenShareHook {
+  const nativeBroadcast = useNativeBroadcast((s) => s.broadcast);
+  const activeServerId = useAppStore((s) => s.activeServerId);
   const ownSession = useAppStore((s) => s.ownSession);
   const users = useAppStore((s) => s.users);
   const currentChannel = useAppStore((s) => s.currentChannel);
@@ -715,7 +720,9 @@ export function useScreenShare(): ScreenShareHook {
   // `isSharingOwn` flag (and the module-level `localStream`), causing
   // the desktop-overlay button and a phantom local preview to appear
   // on the wrong tab.
-  const isBroadcasting = broadcastingOwnSession !== null
+  const isBroadcasting = nativeBroadcast
+    ? nativeBroadcast.serverId === activeServerId && nativeBroadcast.ownSession === ownSession && nativeBroadcast.status !== null
+    : broadcastingOwnSession !== null
     && ownSession !== null
     && broadcastingOwnSession === ownSession;
   // True when a different tab in the same window already owns the
@@ -723,7 +730,9 @@ export function useScreenShare(): ScreenShareHook {
   // `getDisplayMedia` per webview at a time, so attempting to share
   // again from another tab would silently no-op against the existing
   // `localStream`.
-  const isBroadcastingFromOtherTab = broadcastingOwnSession !== null
+  const isBroadcastingFromOtherTab = nativeBroadcast
+    ? nativeBroadcast.serverId !== activeServerId || nativeBroadcast.status === null
+    : broadcastingOwnSession !== null
     && (ownSession === null || broadcastingOwnSession !== ownSession);
   const [stream, setStream] = useState<MediaStream | null>(localStream);
 
@@ -732,12 +741,21 @@ export function useScreenShare(): ScreenShareHook {
 
   // Register the WebRTC signal handler for screen share signaling.
   useEffect(() => {
+    // Restore the active server's snapshot before replay starts negotiation.
+    useAppStore.setState((s) => {
+      const next = new Set(announcedBroadcasts(activeServerId));
+      if (ownSession !== null && s.broadcastingOwnSession === ownSession
+        && s.broadcastingSessions.has(ownSession)) next.add(ownSession);
+      if (next.size === s.broadcastingSessions.size
+        && [...next].every((session) => s.broadcastingSessions.has(session))) return s;
+      return { broadcastingSessions: next };
+    });
     const unregister = onWebRtcSignal((senderSession, targetSession, signalType, payload, serverId) => {
       if (senderSession === null) return;
       handleSignal(senderSession, targetSession, signalType, payload, serverId);
-    });
+    }, activeServerId);
     return unregister;
-  }, []);
+  }, [activeServerId, ownSession]);
 
   // Re-announce broadcast when new users join our channel (late-joiner fix).
   useEffect(() => {
@@ -759,7 +777,7 @@ export function useScreenShare(): ScreenShareHook {
   // Clean up when the user disconnects.
   useEffect(() => {
     if (!ownSession) {
-      stopBroadcasting();
+      if (!useNativeBroadcast.getState().broadcast) stopBroadcasting();
       closeViewer();
       setStream(null);
     }
@@ -781,7 +799,7 @@ export function useScreenShare(): ScreenShareHook {
   }, [isBroadcasting, stream, ownSession]);
 
   const startSharing = useCallback(async () => {
-    if (localStream) return; // already broadcasting
+    if (localStream || useNativeBroadcast.getState().broadcast) return;
 
     const { serverConfig } = useAppStore.getState();
     if (serverConfig.webrtc_sfu_available) {
@@ -846,6 +864,10 @@ export function useScreenShare(): ScreenShareHook {
   }, [ownSession]);
 
   const stopSharingCb = useCallback(() => {
+    if (useNativeBroadcast.getState().broadcast) {
+      void stopNativeBroadcast().catch((e: unknown) => showWebRtcError(String(e)));
+      return;
+    }
     // Capture the broadcaster's serverId BEFORE stopBroadcasting()
     // clears it - the STOP signal must travel through the same
     // connection that announced the broadcast.
@@ -867,6 +889,7 @@ export function useScreenShare(): ScreenShareHook {
   // sessions that stopped broadcasting.
   useEffect(() => {
     if (!ownSession) return;
+    if (useAppStore.getState().broadcastingSessions !== broadcastingSessions) return;
     for (const session of broadcastingSessions) {
       if (session !== ownSession && !viewerPcs.has(session)) {
         startWatching(session).catch((e) =>
@@ -874,12 +897,12 @@ export function useScreenShare(): ScreenShareHook {
         );
       }
     }
-    for (const [session] of viewerPcs) {
-      if (!broadcastingSessions.has(session)) {
+    for (const [session, viewer] of viewerPcs) {
+      if (viewer.serverId === activeServerId && !broadcastingSessions.has(session)) {
         closeViewer(session);
       }
     }
-  }, [broadcastingSessions, ownSession]);
+  }, [broadcastingSessions, ownSession, activeServerId]);
 
   const watchBroadcast = useCallback((session: number) => {
     useAppStore.setState({
@@ -957,4 +980,57 @@ export function useRemoteStream(session: number): MediaStream | null {
   }, [session]);
 
   return stream;
+}
+
+/** Sample only the viewer PC belonging to this server/session, including SFU fallback. */
+export function useRemoteConnectionStats(session: number): ViewerConnectionStats {
+  const serverId = useAppStore((s) => s.activeServerId);
+  const [snapshot, setSnapshot] = useState({ session, serverId, stats: CONNECTING_STATS });
+  useEffect(() => {
+    let disposed = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let lastPc: RTCPeerConnection | null = null;
+    let previous: VideoSamples = new Map();
+    const publish = (stats: ViewerConnectionStats) => {
+      if (!disposed) setSnapshot({ session, serverId, stats });
+    };
+    async function sample() {
+      const viewer = viewerPcs.get(session);
+      const pc = viewer?.serverId === serverId ? viewer.pc : null;
+      if (pc !== lastPc) {
+        lastPc = pc;
+        previous = new Map();
+        publish(CONNECTING_STATS);
+      }
+      const route = pc?.connectionState === "connected" && viewer?.transport !== "pending"
+        ? (viewer?.transport === "direct" ? "p2p" : "sfu") : "connecting";
+      if (!pc || route === "connecting") {
+        previous = new Map();
+        publish(CONNECTING_STATS);
+      } else {
+        try {
+          const reports = await pc.getStats();
+          if (disposed) return;
+          // A delayed sample from an old PC must not survive fallback, STOP or tab changes.
+          if (viewerPcs.get(session) !== viewer || useAppStore.getState().activeServerId !== serverId
+            || pc.connectionState !== "connected") {
+            previous = new Map();
+            publish(CONNECTING_STATS);
+          } else {
+            const current = readViewerStats(reports, previous);
+            previous = current.samples;
+            publish({ route, rttMs: current.rttMs, bitrateKbps: current.bitrateKbps });
+          }
+        } catch {
+          previous = new Map();
+          publish(viewerPcs.get(session) === viewer && useAppStore.getState().activeServerId === serverId
+            && pc.connectionState === "connected" ? { route, rttMs: null, bitrateKbps: null } : CONNECTING_STATS);
+        }
+      }
+      if (!disposed) timer = setTimeout(() => { void sample(); }, 1000);
+    }
+    void sample();
+    return () => { disposed = true; if (timer !== undefined) clearTimeout(timer); };
+  }, [session, serverId]);
+  return snapshot.session === session && snapshot.serverId === serverId ? snapshot.stats : CONNECTING_STATS;
 }

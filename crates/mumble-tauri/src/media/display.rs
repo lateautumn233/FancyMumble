@@ -23,8 +23,7 @@ use windows::Win32::Graphics::Dxgi::{
     CreateDXGIFactory1, IDXGIAdapter1, IDXGIFactory1, IDXGIOutput, DXGI_OUTPUT_DESC,
 };
 use windows::Win32::UI::HiDpi::{
-    SetThreadDpiAwarenessContext, DPI_AWARENESS_CONTEXT,
-    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+    SetThreadDpiAwarenessContext, DPI_AWARENESS_CONTEXT, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
 
 use super::capture::CaptureSource;
@@ -38,16 +37,15 @@ use super::settings::OutputSize;
 /// capture filters work in the panel's real pixels, so the virtualised figure
 /// would make the pipeline think it had to scale when it did not - and would
 /// make a "1080p" preset a no-op on exactly the machines that need it.
-struct DpiAware(Option<DPI_AWARENESS_CONTEXT>);
+pub(super) struct DpiAware(Option<DPI_AWARENESS_CONTEXT>);
 
 impl DpiAware {
     /// Enter per-monitor DPI awareness for this thread.
-    fn enter() -> Self {
+    pub(super) fn enter() -> Self {
         // SAFETY: a plain thread-local setting with no preconditions; the
         // return value is the previous context, or null if the call failed.
-        let previous = unsafe {
-            SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)
-        };
+        let previous =
+            unsafe { SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
         if previous.0.is_null() {
             tracing::debug!("could not set per-monitor DPI awareness for display enumeration");
             return Self(None);
@@ -194,7 +192,11 @@ fn utf16_prefix(field: &[u16]) -> String {
 /// across re-enumeration; the output index alone is ambiguous on a multi-
 /// adapter machine, where each adapter numbers its outputs from zero.
 pub(crate) fn find(source: CaptureSource) -> Result<DisplayInfo, String> {
-    let CaptureSource::Monitor { output_index, hmonitor } = source else {
+    let CaptureSource::Monitor {
+        output_index,
+        hmonitor,
+    } = source
+    else {
         return Err("not a monitor source".to_owned());
     };
 

@@ -39,11 +39,13 @@ import ChannelsAndRolesPanel from "../../components/onboarding/ChannelsAndRolesP
 import { isOnboardingSupported } from "../../components/onboarding/onboardingStore";
 import PluginsPanel from "./PluginsPanel";
 import { isMobile } from "../../utils/platform";
+import { ScreenSharePanel } from "./ScreenSharePanel";
+import { Monitor } from "lucide-react";
 import styles from "./SettingsPage.module.css";
 
 // -- Types & constants ----------------------------------------------
 
-type Tab = "profile" | "voice" | "shortcuts" | "identities" | "advanced" | "personalize" | "localization" | "notifications" | "privacy" | "channels-roles" | "plugins";
+type Tab = "profile" | "voice" | "screen-share" | "shortcuts" | "identities" | "advanced" | "personalize" | "localization" | "notifications" | "privacy" | "channels-roles" | "plugins";
 
 const DEFAULT_AUDIO: AudioSettings = {
   selected_device: null,
@@ -89,6 +91,7 @@ function buildTabs(t: (key: string) => string, hasPlugins: boolean): TabDef<Tab>
   const tabs: TabDef<Tab>[] = [
     { id: "profile",        label: t("tabs.profile"),        icon: <UserIcon     width={TAB_ICON_SIZE} height={TAB_ICON_SIZE} /> },
     { id: "voice",          label: t("tabs.voice"),          icon: <MicIcon      width={TAB_ICON_SIZE} height={TAB_ICON_SIZE} /> },
+    ...(!isMobile ? [{ id: "screen-share" as const, label: t("screenShare.tab"), icon: <Monitor size={TAB_ICON_SIZE} /> }] : []),
     { id: "shortcuts",      label: t("tabs.shortcuts"),      icon: <KeyboardIcon width={TAB_ICON_SIZE} height={TAB_ICON_SIZE} /> },
     { id: "identities",     label: t("tabs.identities"),     icon: <KeyIcon      width={TAB_ICON_SIZE} height={TAB_ICON_SIZE} /> },
     { id: "notifications",  label: t("tabs.notifications"),  icon: <BellIcon     width={TAB_ICON_SIZE} height={TAB_ICON_SIZE} /> },
@@ -795,6 +798,7 @@ export default function SettingsPage() {
             />
           )}
 
+          {tab === "screen-share" && <ScreenSharePanel />}
           {tab === "shortcuts" && (
             <ShortcutsPanel
               shortcuts={shortcuts}

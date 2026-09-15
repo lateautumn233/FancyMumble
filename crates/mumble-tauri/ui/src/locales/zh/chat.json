@@ -271,6 +271,11 @@
     "readByEveryone": "所有人已读"
   },
   "screenShare": {
+    "connectionStats": "共享连接统计",
+    "rtt": "网络往返延迟（RTT）",
+    "receiveBitrate": "视频接收码率",
+    "route": { "connecting": "正在建立媒体连接", "p2p": "与共享端直接连接", "sfu": "视频由服务器中转" },
+    "preview": "画面预览",
     "alreadySharingOtherServer": "你正在另一台服务器上共享屏幕，请先停止该共享。",
     "mute": "静音",
     "unmute": "取消静音",
@@ -294,7 +299,7 @@
     "p2pLabel": "P2P",
     "p2pTooltip": "此服务器没有 SFU，直播直接在成员之间传输",
     "banner": {
-      "isSharingScreen": "{{name}} 正在共享屏幕",
+      "isSharingScreen": "<broadcaster/> 正在共享屏幕",
       "watch": "观看",
       "dismiss": "关闭通知"
     }
