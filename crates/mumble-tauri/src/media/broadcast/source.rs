@@ -1,7 +1,12 @@
 //! Capture adapter; the transport remains buildable without native libraries.
 
 use super::{frame::FrameSink, StartRequest};
+#[cfg(all(target_os = "windows", feature = "native-screenshare"))]
+use crate::media::audio::capture::Handle as AudioCapture;
+use crate::media::audio::Packet;
 use crate::media::settings::ResolvedEncoding;
+use std::sync::Arc;
+use tokio::sync::broadcast;
 
 /// The operations needed by the broadcast owner, independent of the backend.
 pub(super) trait Capture: Send {
@@ -16,19 +21,28 @@ pub(super) trait Capture: Send {
 }
 
 #[cfg(all(target_os = "windows", feature = "native-screenshare"))]
-impl Capture for crate::media::pipeline::PipelineHandle {
+struct NativeCapture {
+    video: crate::media::pipeline::PipelineHandle,
+    audio: Option<AudioCapture>,
+}
+
+#[cfg(all(target_os = "windows", feature = "native-screenshare"))]
+impl Capture for NativeCapture {
     fn encoder_id(&self) -> &str {
-        self.encoder_id()
+        self.video.encoder_id()
     }
     fn encoding(&self) -> ResolvedEncoding {
-        self.encoding()
+        self.video.encoding()
     }
     fn request_key_frame(&self) {
-        self.request_key_frame();
+        self.video.request_key_frame();
     }
     fn stopped(&self) -> Option<Result<(), String>> {
         use crate::media::pipeline::StopReason;
-        self.stop_reason().map(|reason| match reason {
+        if let Some(error) = self.audio.as_ref().and_then(AudioCapture::error) {
+            return Some(Err(error));
+        }
+        self.video.stop_reason().map(|reason| match reason {
             StopReason::Requested | StopReason::SourceEnded => Ok(()),
             StopReason::Failed { message } => Err(message),
         })
@@ -41,6 +55,7 @@ pub(super) fn start(
     request: StartRequest,
     data_dir: &std::path::Path,
     sink: FrameSink,
+    audio: Option<broadcast::Sender<Arc<Packet>>>,
 ) -> Result<Box<dyn Capture>, String> {
     use crate::media::{encoder, pipeline};
     request.settings.validate()?;
@@ -55,7 +70,11 @@ pub(super) fn start(
         encoder_input: selection.input,
         draw_cursor: request.draw_cursor,
     };
-    Ok(Box::new(pipeline::start(&config, sink)?))
+    let video = pipeline::start(&config, sink)?;
+    let audio = audio
+        .map(|packets| AudioCapture::start(source, packets))
+        .transpose()?;
+    Ok(Box::new(NativeCapture { video, audio }))
 }
 
 /// Builds without capture support retain an explicit error at the command boundary.
@@ -64,8 +83,9 @@ pub(super) fn start(
     request: StartRequest,
     _data_dir: &std::path::Path,
     _sink: FrameSink,
+    _audio: Option<broadcast::Sender<Arc<Packet>>>,
 ) -> Result<Box<dyn Capture>, String> {
     request.settings.validate()?;
-    let _ = (request.source, request.draw_cursor);
+    let _ = (request.source, request.draw_cursor, request.share_audio);
     Err("native screen sharing requires Windows and the native-screenshare feature".to_owned())
 }

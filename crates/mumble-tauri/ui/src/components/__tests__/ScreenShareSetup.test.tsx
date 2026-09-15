@@ -9,7 +9,7 @@ const storage = vi.hoisted(() => ({ get: vi.fn(), set: vi.fn(), save: vi.fn() })
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 vi.mock("../../utils/store", () => ({ load: vi.fn(async () => storage) }));
 
-const defaults: SharePreferences = { settings: { capture: "ddagrab", encoder: "auto", resolution: { mode: "native" }, fps: 30, bitrateKbps: null, p2p: "auto", p2pMaxViewers: 2 }, drawCursor: true };
+const defaults: SharePreferences = { settings: { capture: "ddagrab", encoder: "auto", resolution: { mode: "native" }, fps: 30, bitrateKbps: null, p2p: "auto", p2pMaxViewers: 2 }, drawCursor: true, shareAudio: true };
 const context = { serverId: "server-a", ownSession: 1, channelId: 0 };
 const start = vi.fn().mockResolvedValue(undefined);
 const close = vi.fn();
@@ -39,6 +39,25 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("screen-share preflight", () => {
+  it("enables audio for existing preferences and preserves an explicit opt-out", async () => {
+    storage.get.mockResolvedValue({ settings: defaults.settings, drawCursor: true });
+    const { unmount } = render(<ScreenShareSetupDialog context={context} onClose={close} onStart={start} />);
+    expect((await screen.findByRole("checkbox", { name: "Share audio" }) as HTMLInputElement).checked).toBe(true);
+    fireEvent.click(screen.getByRole("checkbox", { name: "Share audio" }));
+    fireEvent.click(screen.getByRole("button", { name: "Set as default" }));
+    await screen.findByRole("button", { name: "Defaults saved" });
+    expect(storage.set).toHaveBeenCalledWith("screenShare", expect.objectContaining({ shareAudio: false }));
+    unmount();
+    storage.get.mockResolvedValue({ ...defaults, shareAudio: false });
+    render(<ScreenShareSetupDialog context={context} onClose={close} onStart={start} />);
+    expect((await screen.findByRole("checkbox", { name: "Share audio" }) as HTMLInputElement).checked).toBe(false);
+    fireEvent.click(screen.getByRole("radio", { name: /Display 1/ }));
+    await waitFor(() => expect((screen.getByRole("button", { name: "Start sharing" }) as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(screen.getByRole("button", { name: "Start sharing" }));
+    await waitFor(() => expect(start).toHaveBeenCalled());
+    expect(start.mock.calls[0][0].shareAudio).toBe(false);
+  });
+
   it("starts with temporary common settings without overwriting defaults", async () => {
     render(<ScreenShareSetupDialog context={context} onClose={close} onStart={start} />);
     fireEvent.click(await screen.findByRole("radio", { name: /Display 1/ }));
@@ -47,6 +66,7 @@ describe("screen-share preflight", () => {
     fireEvent.click(screen.getByRole("button", { name: "Start sharing" }));
     await waitFor(() => expect(start).toHaveBeenCalled());
     expect(start.mock.calls[0][0].settings.fps).toBe(60);
+    expect(start.mock.calls[0][0].shareAudio).toBe(true);
     expect(start.mock.calls[0][1]).toEqual(context);
     expect(storage.set).not.toHaveBeenCalled();
   });

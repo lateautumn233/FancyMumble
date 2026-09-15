@@ -21,6 +21,7 @@ export function ScreenShareOptions({ value, report, onChange, suggestedBitrate }
   const selected = report.encoders.find((e) => e.id === settings.encoder);
   return <>
     <div className={styles.options}>
+      <label className={styles.check}><input type="checkbox" checked={value.shareAudio} onChange={(e) => onChange({ ...value, shareAudio: e.target.checked })} />{t("screenShare.audio")}</label>
       <label className={styles.wide} htmlFor={`${id}-encoder`}>{t("screenShare.encoder")}
         <select id={`${id}-encoder`} value={settings.encoder} onChange={(e) => update({ encoder: e.target.value })}>
           <option value="auto" disabled={!report.autoSelected}>{t("screenShare.auto")}{report.autoSelected ? ` (${report.autoSelected})` : ""}</option>

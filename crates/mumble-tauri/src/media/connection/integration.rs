@@ -40,6 +40,16 @@ impl PeerConnectionEventHandler for Receiver {
 #[tokio::test]
 async fn loopback_negotiates_sends_rtp_and_preserves_dropped_frame_timestamps(
 ) -> Result<(), Box<dyn std::error::Error>> {
+    loopback(false).await
+}
+
+#[tokio::test]
+async fn loopback_negotiates_video_and_stereo_opus_and_preserves_audio_gaps(
+) -> Result<(), Box<dyn std::error::Error>> {
+    loopback(true).await
+}
+
+async fn loopback(with_audio: bool) -> Result<(), Box<dyn std::error::Error>> {
     if std::env::var_os("FANCY_WEBRTC_TEST_TRACE").is_some() {
         let _ = tracing_subscriber::fmt()
             .with_env_filter("webrtc=debug,rtc=debug")
@@ -63,8 +73,14 @@ async fn loopback_negotiates_sends_rtp_and_preserves_dropped_frame_timestamps(
         vec!["127.0.0.1:0".to_owned()],
     )
     .await?;
+    if with_audio {
+        sender.enable_audio().await?;
+    }
     let mut engine = MediaEngine::default();
     engine.register_codec(Codec::H264.codec_parameters(), RtpCodecKind::Video)?;
+    if with_audio {
+        engine.register_codec(audio::codec_parameters(), RtpCodecKind::Audio)?;
+    }
     let receiver: Arc<dyn PeerConnection> = Arc::new(
         PeerConnectionBuilder::new()
             .with_media_engine(engine)
@@ -115,6 +131,10 @@ async fn exercise(
     connected: &AtomicBool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let offer = sender.create_offer().await?;
+    assert_eq!(offer.contains("m=audio"), sender.audio.is_some());
+    if sender.audio.is_some() {
+        assert!(offer.contains("opus/48000/2"));
+    }
     assert!(offer.contains("a=sendonly"));
     assert!(offer.contains("nack pli"));
     receiver
@@ -144,6 +164,9 @@ async fn exercise(
     }
     assert_eq!(timestamps[1].wrapping_sub(timestamps[0]), 33 * 90);
     assert_eq!(timestamps[2].wrapping_sub(timestamps[0]), 200 * 90);
+    if sender.audio.is_some() {
+        exercise_audio(sender, &mut remote_tracks).await?;
+    }
     track
         .write_rtcp(vec![Box::new(
             rtc::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication {
@@ -163,5 +186,31 @@ async fn exercise(
         .add_ice_candidate("not JSON".to_owned())
         .await
         .is_err());
+    Ok(())
+}
+
+async fn exercise_audio(
+    sender: &mut Connection,
+    tracks: &mut mpsc::UnboundedReceiver<Arc<dyn TrackRemote>>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let bytes = vec![0xf8, 0xff, 0xfe]; // RFC 6716 Opus silence packet.
+    for pts_samples in [0, 960, 4800] {
+        sender
+            .send_audio(&crate::media::audio::Packet {
+                bytes: bytes.clone(),
+                pts_samples,
+            })
+            .await?;
+    }
+    let audio = tracks.recv().await.ok_or("no remote audio track")?;
+    let mut timestamps = Vec::new();
+    while timestamps.len() < 3 {
+        if let Some(TrackRemoteEvent::OnRtpPacket(packet)) = audio.poll().await {
+            assert_eq!(packet.payload.as_ref(), bytes.as_slice());
+            timestamps.push(packet.header.timestamp);
+        }
+    }
+    assert_eq!(timestamps[1].wrapping_sub(timestamps[0]), 960);
+    assert_eq!(timestamps[2].wrapping_sub(timestamps[0]), 4800);
     Ok(())
 }

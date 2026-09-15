@@ -10,7 +10,7 @@ export interface ScreenShareSettings {
   p2p: "auto" | "disabled";
   p2pMaxViewers: number;
 }
-export interface SharePreferences { settings: ScreenShareSettings; drawCursor: boolean }
+export interface SharePreferences { settings: ScreenShareSettings; drawCursor: boolean; shareAudio: boolean }
 export interface EncoderReport {
   supported: boolean;
   autoSelected: string | null;
@@ -35,12 +35,12 @@ export async function loadSharePreferences(): Promise<SharePreferences> {
   const settings = await invoke<ScreenShareSettings>("validate_screen_share_settings", {
     settings: { ...defaults, ...saved?.settings },
   });
-  return { settings, drawCursor: saved?.drawCursor !== false };
+  return { settings, drawCursor: saved?.drawCursor !== false, shareAudio: saved?.shareAudio !== false };
 }
 
 export async function saveSharePreferences(value: SharePreferences): Promise<void> {
   const settings = await invoke<ScreenShareSettings>("validate_screen_share_settings", { settings: value.settings });
   const store = await load("preferences.json", { autoSave: true, defaults: {} });
-  await store.set("screenShare", { settings, drawCursor: value.drawCursor });
+  await store.set("screenShare", { settings, drawCursor: value.drawCursor, shareAudio: value.shareAudio });
   await store.save();
 }
