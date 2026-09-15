@@ -36,6 +36,7 @@ use super::frame::EncodedFrame;
 
 mod audio;
 mod feedback;
+mod network;
 
 /// Clock rate every WebRTC video codec uses, in Hz.
 const VIDEO_CLOCK_RATE: u32 = 90_000;
@@ -159,6 +160,7 @@ impl Connection {
         handler: Arc<dyn webrtc::peer_connection::PeerConnectionEventHandler>,
         runtime: Arc<dyn webrtc::runtime::Runtime>,
     ) -> Result<Self, String> {
+        let (runtime, udp_addrs) = network::configure(runtime)?;
         Self::with_ice_servers(
             codec,
             fps,
@@ -168,7 +170,7 @@ impl Connection {
                 urls: STUN_URLS.iter().map(|u| (*u).to_owned()).collect(),
                 ..Default::default()
             }],
-            vec!["0.0.0.0:0".to_owned()],
+            udp_addrs,
         )
         .await
     }
