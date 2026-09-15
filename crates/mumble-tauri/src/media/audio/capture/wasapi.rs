@@ -10,10 +10,12 @@ use std::time::Duration;
 
 use windows::core::{implement, Interface, HRESULT};
 use windows::Win32::Media::Audio::*;
+#[cfg(test)]
+use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_ALL};
 use windows::Win32::System::Com::{
-    CoCreateInstance, CoInitializeEx, CoUninitialize,
+    CoInitializeEx, CoUninitialize,
     StructuredStorage::{PROPVARIANT, PROPVARIANT_0, PROPVARIANT_0_0, PROPVARIANT_0_0_0},
-    BLOB, CLSCTX_ALL, COINIT_MULTITHREADED,
+    BLOB, COINIT_MULTITHREADED,
 };
 use windows::Win32::System::Variant::VT_BLOB;
 use windows_sys::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId;
@@ -54,12 +56,25 @@ impl Capture {
             CaptureSource::Monitor { .. } => None,
         };
         let client = match window {
-            Some((_, pid)) => process_client(pid).map_err(|e| {
-                format!(
+            Some((_, pid)) => {
+                process_client(pid, PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE).map_err(
+                    |e| {
+                        format!(
                     "could not capture window audio (requires Windows build 20348 or newer): {e}"
                 )
+                    },
+                )?
+            }
+            None => process_client(
+                std::process::id(),
+                PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE,
+            )
+            .map_err(|e| {
+                format!(
+                    "could not capture display audio without FancyMumble audio \
+                     (requires Windows build 20348 or newer): {e}"
+                )
             })?,
-            None => device_client()?,
         };
         Self::from_client(client, window)
     }
@@ -173,6 +188,7 @@ fn window_process(hwnd: u64) -> Result<u32, String> {
     Ok(pid)
 }
 
+#[cfg(test)]
 fn device_client() -> Result<IAudioClient, String> {
     // Endpoint and activation objects are created and dropped in the same MTA.
     unsafe {
@@ -200,7 +216,7 @@ impl IActivateAudioInterfaceCompletionHandler_Impl for Completion_Impl {
     }
 }
 
-fn process_client(pid: u32) -> Result<IAudioClient, String> {
+fn process_client(pid: u32, mode: PROCESS_LOOPBACK_MODE) -> Result<IAudioClient, String> {
     let (tx, rx) = mpsc::sync_channel(1);
     let completion: IActivateAudioInterfaceCompletionHandler = Completion(tx).into();
     let mut params = AUDIOCLIENT_ACTIVATION_PARAMS {
@@ -208,7 +224,7 @@ fn process_client(pid: u32) -> Result<IAudioClient, String> {
         Anonymous: AUDIOCLIENT_ACTIVATION_PARAMS_0 {
             ProcessLoopbackParams: AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS {
                 TargetProcessId: pid,
-                ProcessLoopbackMode: PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE,
+                ProcessLoopbackMode: mode,
             },
         },
     };

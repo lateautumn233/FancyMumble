@@ -1,19 +1,9 @@
-//! Opt-in hardware verification, with a quiet tone and a separate silent process.
+//! Opt-in hardware verification with a quiet tone from the current process.
 
 use super::*;
 use crate::media::audio::encoding::Encoder;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use std::os::windows::process::CommandExt;
-use std::process::{Child, Command, Stdio};
 use std::time::Instant;
-
-struct SilentProcess(Child);
-impl Drop for SilentProcess {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
 
 #[test]
 fn missing_window_audio_never_falls_back_to_the_device() {
@@ -25,23 +15,21 @@ fn missing_window_audio_never_falls_back_to_the_device() {
 #[ignore = "plays a quiet tone on the default Windows output device"]
 fn device_and_process_loopback_isolate_audio() -> Result<(), Box<dyn std::error::Error>> {
     let _com = Com::new()?;
-    let silent = SilentProcess(
-        Command::new("powershell.exe")
-            .args([
-                "-NoProfile",
-                "-NonInteractive",
-                "-Command",
-                "Start-Sleep -Seconds 30",
-            ])
-            .creation_flags(0x0800_0000)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()?,
-    );
     let mut device = Capture::from_client(device_client()?, None)?;
-    let mut included = Capture::from_client(process_client(std::process::id())?, None)?;
-    let mut excluded = Capture::from_client(process_client(silent.0.id())?, None)?;
+    let mut included = Capture::from_client(
+        process_client(
+            std::process::id(),
+            PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE,
+        )?,
+        None,
+    )?;
+    let mut excluded = Capture::from_client(
+        process_client(
+            std::process::id(),
+            PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE,
+        )?,
+        None,
+    )?;
     device.start()?;
     included.start()?;
     excluded.start()?;
@@ -85,9 +73,10 @@ fn device_and_process_loopback_isolate_audio() -> Result<(), Box<dyn std::error:
         counts[1] > 48_000 && energy[1] > 0.01,
         "target process loopback must hear the tone"
     );
+    let partition_error = (energy[0] - energy[1] - energy[2]).abs();
     assert!(
-        energy[2] < energy[1] * 0.001,
-        "unrelated process audio must not leak"
+        partition_error < energy[0] * 0.05,
+        "device audio must split into the included process and the excluded-process mix"
     );
     Ok(())
 }
