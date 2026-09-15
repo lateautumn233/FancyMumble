@@ -28,6 +28,9 @@ use super::settings::{ResolvedEncoding, ScreenShareSettings};
 
 pub(crate) use super::frame::{EncodedFrame, FrameSink};
 
+#[cfg(all(target_os = "windows", feature = "native-screenshare"))]
+pub(crate) use super::ffmpeg::pipeline::{PreviewHandle, PreviewSnapshot};
+
 /// Everything the pipeline needs to start.
 ///
 /// The settings are the *unresolved* ones on purpose.  Resolving them needs
@@ -229,6 +232,8 @@ pub(crate) struct PipelineHandle {
     /// its canvas.  The transport stage negotiates from these, not from what
     /// was asked for.
     encoding: ResolvedEncoding,
+    /// Latest captured frame, exposed only to the local preview command.
+    preview: PreviewHandle,
 }
 
 impl PipelineHandle {
@@ -238,8 +243,9 @@ impl PipelineHandle {
         threads: Vec<std::thread::JoinHandle<()>>,
         encoder_id: String,
         encoding: ResolvedEncoding,
+        preview: PreviewHandle,
     ) -> Self {
-        Self { shared, threads, encoder_id, encoding }
+        Self { shared, threads, encoder_id, encoding, preview }
     }
 
     /// The encoder in use.
@@ -250,6 +256,11 @@ impl PipelineHandle {
     /// What the encoder was actually opened with.
     pub(crate) fn encoding(&self) -> ResolvedEncoding {
         self.encoding
+    }
+
+    /// Handle for requesting a native point-in-time preview image.
+    pub(crate) fn preview(&self) -> PreviewHandle {
+        self.preview.clone()
     }
 
     /// Current counters.

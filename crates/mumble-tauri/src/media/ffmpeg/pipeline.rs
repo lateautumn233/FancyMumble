@@ -13,6 +13,7 @@
     reason = "FFmpeg pipeline assembly; confined to media::ffmpeg"
 )]
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -41,6 +42,96 @@ struct Slot {
     frame: Option<Frame>,
     /// Set when the capture side is finished, for whatever reason.
     ended: bool,
+}
+
+#[derive(Default, Debug)]
+struct PreviewState {
+    frame: Mutex<Option<Frame>>,
+    sequence: AtomicU64,
+    encoded: Mutex<Option<PreviewSnapshot>>,
+}
+
+/// Handle used by the Tauri command to request a point-in-time JPEG preview.
+#[derive(Clone, Debug)]
+pub(crate) struct PreviewHandle(Arc<PreviewState>);
+
+impl PreviewHandle {
+    /// Publish a newly captured frame and invalidate the encoded preview.
+    fn publish_frame(&self, frame: &Frame) -> Result<(), String> {
+        let copy = frame.new_ref()?;
+        let mut slot = self
+            .0
+            .frame
+            .lock()
+            .map_err(|_| "preview frame lock poisoned".to_owned())?;
+        *slot = Some(copy);
+        let _ = self.0.sequence.fetch_add(1, Ordering::Relaxed);
+        if let Ok(mut encoded) = self.0.encoded.lock() {
+            *encoded = None;
+        }
+        Ok(())
+    }
+
+    /// Publish another tick of the current frame without re-encoding it.
+    ///
+    /// The encoder deliberately repeats the last captured frame when the
+    /// source is idle.  Advancing the preview sequence here keeps the local
+    /// viewer on the configured clock while retaining the cached JPEG bytes.
+    fn republish(&self) {
+        let has_frame = self.0.frame.lock().map(|slot| slot.is_some()).unwrap_or(false);
+        if !has_frame {
+            return;
+        }
+        let sequence = self.0.sequence.fetch_add(1, Ordering::Relaxed) + 1;
+        if let Ok(mut encoded) = self.0.encoded.lock() {
+            if let Some(snapshot) = encoded.as_mut() {
+                snapshot.sequence = sequence;
+            }
+        }
+    }
+
+    /// Return the latest frame and its monotonically increasing sequence.
+    pub(crate) fn snapshot(&self, max_width: u32) -> Result<Option<PreviewSnapshot>, String> {
+        let frame = self
+            .0
+            .frame
+            .lock()
+            .map_err(|_| "preview frame lock poisoned".to_owned())?
+            .as_ref()
+            .map(Frame::new_ref)
+            .transpose()?;
+        let Some(frame) = frame else { return Ok(None); };
+        let sequence = self.0.sequence.load(Ordering::Relaxed);
+        if let Ok(encoded) = self.0.encoded.lock() {
+            if let Some(snapshot) = encoded.as_ref().filter(|snapshot| snapshot.sequence == sequence && snapshot.width <= max_width) {
+                return Ok(Some(PreviewSnapshot {
+                    sequence: snapshot.sequence,
+                    width: snapshot.width,
+                    height: snapshot.height,
+                    bytes: snapshot.bytes.clone(),
+                }));
+            }
+        }
+        let (width, height, bytes) = frame.to_jpeg(max_width)?;
+        let snapshot = PreviewSnapshot { sequence, width, height, bytes };
+        if let Ok(mut encoded) = self.0.encoded.lock() {
+            *encoded = Some(PreviewSnapshot {
+                sequence: snapshot.sequence,
+                width: snapshot.width,
+                height: snapshot.height,
+                bytes: snapshot.bytes.clone(),
+            });
+        }
+        Ok(Some(snapshot))
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct PreviewSnapshot {
+    pub(crate) sequence: u64,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    pub(crate) bytes: Vec<u8>,
 }
 
 /// The mailbox between the capture and encode threads.
@@ -86,6 +177,7 @@ pub(crate) fn start(
         fps = encoding.fps, bitrate_kbps = encoding.bitrate_kbps);
 
     let shared = Arc::new(Shared::default());
+    let preview = PreviewHandle(Arc::new(PreviewState::default()));
     let mailbox = Arc::new(Mailbox::default());
     let fps = encoding.fps.max(1);
 
@@ -103,11 +195,19 @@ pub(crate) fn start(
 
     let encode_shared = Arc::clone(&shared);
     let encode_mailbox = Arc::clone(&mailbox);
+    let encode_preview = preview.clone();
     let encode = std::thread::Builder::new()
         .name("screenshare-encode".to_owned())
         .spawn(move || {
             let _entered = encode_span.enter();
-            encode_loop(&mut encoder, &encode_shared, &encode_mailbox, fps, &mut sink);
+            encode_loop(
+                &mut encoder,
+                &encode_shared,
+                &encode_mailbox,
+                fps,
+                &mut sink,
+                &encode_preview,
+            );
             drop(devices);
         })
         .map_err(|e| format!("could not start encode thread: {e}"))?;
@@ -117,6 +217,7 @@ pub(crate) fn start(
         vec![capture, encode],
         config.encoder_id.clone(),
         encoding,
+        preview,
     ))
 }
 
@@ -314,6 +415,7 @@ fn encode_loop(
     mailbox: &Mailbox,
     fps: u32,
     sink: &mut FrameSink,
+    preview: &PreviewHandle,
 ) {
     let interval = Duration::from_secs_f64(FRAME_WAIT_SLACK / f64::from(fps));
     let started = Instant::now();
@@ -352,6 +454,11 @@ fn encode_loop(
                 "screen-share encoding failed");
             shared.finish(StopReason::Failed { message });
             break;
+        }
+        if repeated {
+            preview.republish();
+        } else if let Err(error) = preview.publish_frame(source) {
+            tracing::debug!(%error, "could not cache native preview frame");
         }
         if !first_packet_logged && shared.stats.snapshot().packets > 0 {
             first_packet_logged = true;

@@ -839,7 +839,7 @@ macro_rules! all_command_handlers {
             commands::screen_share::start_native_screen_share,
             commands::screen_share::stop_native_screen_share,
             commands::screen_share::native_screen_share_status,
-            commands::screen_share::native_screen_share_preview,
+            commands::screen_share::native_screen_share_preview_frame,
             #[cfg(not(target_os = "android"))]
             updater::commands::updater_check,
             #[cfg(not(target_os = "android"))]

@@ -37,7 +37,7 @@ dhat-heap = ["dep:dhat"]
 # `vcpkg` crate and needs `libclang.dll` at build time (see `TODO.md` 0.3).
 # CI runners have neither, so this stays OFF by default and the encoder
 # commands report `supported: false` in builds without it.
-native-screenshare = ["dep:ffmpeg-sys-next", "dep:windows"]
+native-screenshare = ["dep:ffmpeg-sys-next", "dep:windows", "dep:image"]
 
 [dependencies]
 fancy-utils = { path = "../fancy-utils" }
@@ -124,6 +124,8 @@ webview2-com = "0.38"
 windows-core = "0.61"
 
 # --- `native-screenshare` feature only (Windows) ----------------------
+# Reuse the image version already used by fancy-utils for JPEG previews.
+image = { version = "0.25", default-features = false, features = ["jpeg"], optional = true }
 #
 # FFmpeg FFI for hardware video encoding. Version must track the FFmpeg
 # major.minor installed via vcpkg (currently 8.1.2), see `TODO.md` 0.3.

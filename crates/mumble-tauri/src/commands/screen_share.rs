@@ -13,46 +13,44 @@ use crate::media::encoder::{self, EncoderReport, Selection};
 use crate::media::settings::{OutputSize, ResolvedEncoding, ScreenShareSettings};
 use crate::media::transport::{Allocator, SfuReason};
 
-/// Negotiate or close the local-only preview of an existing broadcast.
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct NativePreviewFrame {
+    pub(crate) sequence: u64,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    pub(crate) mime: &'static str,
+    pub(crate) data: String,
+}
+
+/// Return the latest native capture frame as a small JPEG.
 #[tauri::command]
-pub(crate) fn native_screen_share_preview(
+pub(crate) fn native_screen_share_preview_frame(
     state: tauri::State<'_, crate::state::AppState>,
     server_id: String,
     broadcast_id: String,
-    preview_id: String,
-    action: String,
-    payload: Option<String>,
-    channel: tauri::ipc::Channel<serde_json::Value>,
-) -> Result<(), String> {
-    #[cfg(not(target_os = "android"))]
+    max_width: Option<u32>,
+) -> Result<Option<NativePreviewFrame>, String> {
+    #[cfg(all(target_os = "windows", feature = "native-screenshare"))]
     {
-        use crate::media::broadcast::PreviewAction;
-        let _ = uuid::Uuid::parse_str(&preview_id).map_err(|_| "Invalid preview id")?;
-        let payload = payload.unwrap_or_default();
-        if payload.len() > 128 * 1024 {
-            return Err("Preview signal too large".to_owned());
-        }
-        let action = match action.as_str() {
-            "start" => PreviewAction::Start(channel),
-            "answer" => PreviewAction::Answer(payload),
-            "ice" => PreviewAction::Ice(payload),
-            "stop" => PreviewAction::Stop,
-            _ => return Err("Invalid preview action".to_owned()),
-        };
-        state.native_screen_share_preview(&server_id, &broadcast_id, preview_id, action)
+        use base64::Engine as _;
+        let snapshot = state.native_screen_share_preview_frame(
+            &server_id,
+            &broadcast_id,
+            max_width.unwrap_or(640).clamp(160, 1280),
+        )?;
+        return Ok(snapshot.map(|snapshot| NativePreviewFrame {
+            sequence: snapshot.sequence,
+            width: snapshot.width,
+            height: snapshot.height,
+            mime: "image/jpeg",
+            data: base64::engine::general_purpose::STANDARD.encode(snapshot.bytes),
+        }));
     }
-    #[cfg(target_os = "android")]
+    #[cfg(not(all(target_os = "windows", feature = "native-screenshare")))]
     {
-        let _ = (
-            state,
-            server_id,
-            broadcast_id,
-            preview_id,
-            action,
-            payload,
-            channel,
-        );
-        Err("Native preview is unavailable on Android".to_owned())
+        let _ = (state, server_id, broadcast_id, max_width);
+        Err("Native preview is unavailable in this build".to_owned())
     }
 }
 

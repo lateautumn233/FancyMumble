@@ -11,6 +11,7 @@ fn broadcaster() -> (SharedState, mpsc::Receiver<Event>) {
         server_id: "pinned-server".to_owned(),
         broadcast_id: "test-broadcast".to_owned(),
         running: true,
+        fps: 30,
         encoder_id: None,
         viewers: Default::default(),
         free_direct_slots: 2,
@@ -32,6 +33,8 @@ fn broadcaster() -> (SharedState, mpsc::Receiver<Event>) {
         events,
         status,
         cancel: CancellationToken::new(),
+        #[cfg(all(target_os = "windows", feature = "native-screenshare"))]
+        preview: Default::default(),
     });
     (state, rx)
 }

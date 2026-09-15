@@ -18,6 +18,9 @@ pub(super) trait Capture: Send {
     fn request_key_frame(&self);
     /// A terminal reason, or `None` while capture is running.
     fn stopped(&self) -> Option<Result<(), String>>;
+    /// Handle for the local native preview, when the capture backend supports it.
+    #[cfg(all(target_os = "windows", feature = "native-screenshare"))]
+    fn preview(&self) -> Option<crate::media::pipeline::PreviewHandle>;
 }
 
 #[cfg(all(target_os = "windows", feature = "native-screenshare"))]
@@ -46,6 +49,9 @@ impl Capture for NativeCapture {
             StopReason::Requested | StopReason::SourceEnded => Ok(()),
             StopReason::Failed { message } => Err(message),
         })
+    }
+    fn preview(&self) -> Option<crate::media::pipeline::PreviewHandle> {
+        Some(self.video.preview())
     }
 }
 

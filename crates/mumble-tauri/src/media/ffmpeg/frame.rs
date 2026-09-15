@@ -12,10 +12,12 @@
 )]
 
 use ffmpeg_sys_next as ff;
+use std::ptr;
 
 use super::errstr;
 
 /// An owned `AVFrame`.
+#[derive(Debug)]
 pub(super) struct Frame(*mut ff::AVFrame);
 
 impl Drop for Frame {
@@ -105,6 +107,116 @@ impl Frame {
                 frame.flags &= !ff::AV_FRAME_FLAG_KEY;
             }
         }
+    }
+
+    /// Convert the frame to a small RGB JPEG for the local native preview.
+    ///
+    /// Capture normally produces a D3D11 hardware frame.  The transfer is
+    /// performed only when the UI asks for a preview image, so the broadcast
+    /// path remains zero-copy while sharing is running.
+    pub(super) fn to_jpeg(&self, max_width: u32) -> Result<(u32, u32, Vec<u8>), String> {
+        let software = self.to_software_frame()?;
+        // SAFETY: the owned software frame remains live until scaling finishes.
+        let (src_width, src_height, src_format) = unsafe {
+            let frame = &*software.0;
+            if frame.width <= 0 || frame.height <= 0 {
+                return Err("preview frame has invalid dimensions".to_owned());
+            }
+            (frame.width, frame.height, frame.format)
+        };
+        let target_width = max_width.clamp(1, 1280).min(src_width as u32);
+        let target_height = ((src_height as u64 * target_width as u64) / src_width as u64)
+            .max(1) as u32;
+        // Bound portrait and extreme-aspect-ratio sources as well as wide ones.
+        let (target_width, target_height) = if target_height > 1280 {
+            (((u64::from(target_width) * 1280) / u64::from(target_height)).max(1) as u32, 1280)
+        } else {
+            (target_width, target_height)
+        };
+        let target = Frame::empty()?;
+        // SAFETY: the empty destination is exclusively owned and allocated below.
+        unsafe {
+            (*target.0).format = ff::AVPixelFormat::AV_PIX_FMT_RGB24 as i32;
+            (*target.0).width = target_width as i32;
+            (*target.0).height = target_height as i32;
+            let ret = ff::av_frame_get_buffer(target.0, 1);
+            if ret < 0 {
+                return Err(format!("could not allocate preview image ({})", errstr(ret)));
+            }
+        }
+        // SAFETY: format is an AVPixelFormat provided by FFmpeg; dimensions are positive.
+        let scaler = unsafe {
+            ff::sws_getContext(
+                src_width,
+                src_height,
+                std::mem::transmute::<i32, ff::AVPixelFormat>(src_format),
+                target_width as i32,
+                target_height as i32,
+                ff::AVPixelFormat::AV_PIX_FMT_RGB24,
+                ff::SwsFlags::SWS_BILINEAR as i32,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null(),
+            )
+        };
+        if scaler.is_null() {
+            return Err("could not create preview scaler".to_owned());
+        }
+        // SAFETY: both frames have allocated planes matching the scaler configuration.
+        let scaled = unsafe {
+            ff::sws_scale(
+                scaler,
+                (*software.0).data.as_ptr() as *const *const u8,
+                (*software.0).linesize.as_ptr(),
+                0,
+                src_height,
+                (*target.0).data.as_mut_ptr(),
+                (*target.0).linesize.as_ptr(),
+            )
+        };
+        // SAFETY: the scaler is uniquely owned and no longer used.
+        unsafe { ff::sws_freeContext(scaler) };
+        if scaled <= 0 {
+            return Err("could not scale preview frame".to_owned());
+        }
+
+        // SAFETY: target is an allocated RGB24 frame; FFmpeg supplies its row stride.
+        let stride = unsafe { (*target.0).linesize[0].max(0) as usize };
+        let row_len = target_width as usize * 3;
+        let mut rgb = Vec::with_capacity(row_len * target_height as usize);
+        // SAFETY: copy only the visible RGB bytes of each allocated row, excluding padding.
+        unsafe {
+            let data = (*target.0).data[0];
+            for row in 0..target_height as usize {
+                let row_ptr = data.add(row * stride);
+                rgb.extend_from_slice(std::slice::from_raw_parts(row_ptr, row_len));
+            }
+        }
+        let mut bytes = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, 75)
+            .encode(&rgb, target_width, target_height, image::ExtendedColorType::Rgb8)
+            .map_err(|e| format!("could not encode preview image: {e}"))?;
+        Ok((target_width, target_height, bytes))
+    }
+
+    fn to_software_frame(&self) -> Result<Self, String> {
+        // SAFETY: this is a live, referenced frame, immutable for this call.
+        let hardware = unsafe {
+            !(*self.0).hw_frames_ctx.is_null()
+                || (*self.0).format == ff::AVPixelFormat::AV_PIX_FMT_D3D11 as i32
+                || (*self.0).format == ff::AVPixelFormat::AV_PIX_FMT_D3D12 as i32
+        };
+        if !hardware {
+            return self.new_ref();
+        }
+        let target = Self::empty()?;
+        // SAFETY: FFmpeg allocates system memory for an empty destination and
+        // synchronizes the transfer through the frame's hardware device context.
+        let ret = unsafe { ff::av_hwframe_transfer_data(target.0, self.0, 0) };
+        if ret < 0 {
+            return Err(format!("could not transfer preview frame ({})", errstr(ret)));
+        }
+        Ok(target)
     }
 }
 

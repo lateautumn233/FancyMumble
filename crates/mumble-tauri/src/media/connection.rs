@@ -265,7 +265,7 @@ impl Connection {
         })
     }
 
-    /// Add source audio before creating the offer. Local previews remain video-only.
+    /// Add source audio before creating the offer.
     pub(crate) async fn enable_audio(&mut self) -> Result<(), String> {
         self.audio = Some(audio::Sender::new(self.peer.as_ref()).await?);
         Ok(())

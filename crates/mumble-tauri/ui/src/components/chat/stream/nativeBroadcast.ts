@@ -9,6 +9,8 @@ export interface NativeStatus {
   serverId: string;
   broadcastId: string;
   running: boolean;
+  /** Effective native encoder frame rate. */
+  fps?: number;
   encoderId: string | null;
   error: string | null;
 }

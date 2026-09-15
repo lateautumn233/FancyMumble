@@ -391,7 +391,6 @@ function RemoteViewer({ session, channelId, ownSession }: { readonly session: nu
         ref={videoRef}
         autoPlay
         playsInline
-        muted
         className={styles.videoElement}
         style={{ display: remoteStream ? "block" : "none" }}
       />

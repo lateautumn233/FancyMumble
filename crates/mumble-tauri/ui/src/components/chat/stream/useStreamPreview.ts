@@ -10,6 +10,8 @@
  */
 import { useState, useEffect, useRef } from "react";
 import { useAppStore } from "../../../store";
+import type { NativeStatus } from "./nativeBroadcast";
+import { fetchNativePreviewFrame } from "./nativePreviewConnection";
 
 const SIGNAL_SDP_OFFER = 2;
 const SIGNAL_ICE_CANDIDATE = 4;
@@ -224,6 +226,17 @@ export async function storeLocalThumbnail(session: number, stream: MediaStream):
   const url = await captureFrame(track);
   if (url) {
     thumbnailCache.set(session, { dataUrl: url, capturedAt: Date.now() });
+  }
+}
+
+/** Store a thumbnail from the native capture pipeline without WebRTC. */
+export async function storeNativeThumbnail(session: number, status: NativeStatus): Promise<void> {
+  const frame = await fetchNativePreviewFrame(status, THUMBNAIL_MAX_WIDTH);
+  if (frame) {
+    thumbnailCache.set(session, {
+      dataUrl: `data:${frame.mime};base64,${frame.data}`,
+      capturedAt: Date.now(),
+    });
   }
 }
 

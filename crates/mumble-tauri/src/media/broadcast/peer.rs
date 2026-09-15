@@ -39,7 +39,6 @@ pub(super) struct Config {
     pub(super) fps: u32,
     pub(super) client: ClientHandle,
     pub(super) events: mpsc::Sender<Event>,
-    pub(super) preview: Option<tauri::ipc::Channel<serde_json::Value>>,
 }
 
 enum Local {
@@ -82,19 +81,7 @@ pub(super) fn spawn(
         let create = async {
             let handler = Arc::new(Handler(local_tx));
             let runtime = Arc::new(webrtc::runtime::TokioRuntime);
-            let mut connection = if config.preview.is_some() {
-                Connection::with_ice_servers(
-                    config.codec,
-                    config.fps,
-                    handler,
-                    runtime,
-                    vec![],
-                    vec!["127.0.0.1:0".to_owned()],
-                )
-                .await
-            } else {
-                Connection::new(config.codec, config.fps, handler, runtime).await
-            }?;
+            let mut connection = Connection::new(config.codec, config.fps, handler, runtime).await?;
             if audio.is_some() {
                 if let Err(error) = connection.enable_audio().await {
                     connection.close().await;
@@ -120,12 +107,6 @@ pub(super) fn spawn(
             Err(_) => Err("WebRTC creation timed out".to_owned()),
         };
         if !token.is_cancelled() {
-            if let Some(channel) = &config.preview {
-                let _ = channel.send(serde_json::json!({
-                    "kind": "error", "payload": outcome.err().unwrap_or_else(|| "Preview connection closed".to_owned()),
-                }));
-                return;
-            }
             let _ = config.events.try_send(Event::PeerEnded {
                 target: config.target,
                 id,
@@ -242,11 +223,6 @@ impl Config {
         direct: SignalType,
         payload: String,
     ) -> Result<(), String> {
-        if let Some(channel) = &self.preview {
-            return channel.send(serde_json::json!({
-                "kind": if sfu == SignalType::SdpOffer { "offer" } else { "ice" }, "payload": payload,
-            })).map_err(|e| format!("preview signaling failed: {e}"));
-        }
         send_signal(
             &self.client,
             Signal {

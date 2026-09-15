@@ -28,6 +28,7 @@ import {
   clearThumbnail,
   closePreview,
   storeLocalThumbnail,
+  storeNativeThumbnail,
 } from "../stream/useStreamPreview";
 import { clearAllStrokesInChannel, clearStrokesFromSender } from "../drawing/DrawingOverlay";
 import { stopNativeBroadcast, useNativeBroadcast } from "./nativeBroadcast";
@@ -787,16 +788,24 @@ export function useScreenShare(): ScreenShareHook {
   // secondary panel in StreamFocusView while watching another broadcaster.
   // Refreshes every 55 s (well within the 60 s TTL) to prevent stale cache.
   useEffect(() => {
-    if (!isBroadcasting || !stream || !ownSession) return;
-    storeLocalThumbnail(ownSession, stream).catch(console.error);
+    const nativeStatus = nativeBroadcast?.serverId === activeServerId
+      ? nativeBroadcast.status
+      : null;
+    if (!isBroadcasting || !ownSession || (!stream && !nativeStatus)) return;
+    const refresh = () => nativeStatus
+      ? storeNativeThumbnail(ownSession, nativeStatus).catch(console.error)
+      : stream
+      ? storeLocalThumbnail(ownSession, stream).catch(console.error)
+      : undefined;
+    void refresh();
     const interval = setInterval(() => {
-      if (localStream) storeLocalThumbnail(ownSession, localStream).catch(console.error);
+      void refresh();
     }, 55_000);
     return () => {
       clearInterval(interval);
       clearThumbnail(ownSession);
     };
-  }, [isBroadcasting, stream, ownSession]);
+  }, [activeServerId, isBroadcasting, nativeBroadcast, stream, ownSession]);
 
   const startSharing = useCallback(async () => {
     if (localStream || useNativeBroadcast.getState().broadcast) return;

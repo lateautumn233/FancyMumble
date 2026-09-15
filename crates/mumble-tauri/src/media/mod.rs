@@ -39,7 +39,6 @@ pub(crate) mod settings;
 pub(crate) mod transport;
 
 /// What to capture, and the filter chain that encodes it.
-#[cfg(all(target_os = "windows", feature = "native-screenshare"))]
 pub(crate) mod capture;
 /// The running capture-and-encode pipeline.
 #[cfg(all(target_os = "windows", feature = "native-screenshare"))]

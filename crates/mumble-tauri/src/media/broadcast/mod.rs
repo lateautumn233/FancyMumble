@@ -5,6 +5,8 @@ mod source;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+#[cfg(all(target_os = "windows", feature = "native-screenshare"))]
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use mumble_protocol::client::ClientHandle;
@@ -52,6 +54,8 @@ pub(crate) struct Status {
     pub(crate) broadcast_id: String,
     /// True until every sender and the capture source have stopped.
     pub(crate) running: bool,
+    /// Effective encoded video frame rate used by the native pipeline.
+    pub(crate) fps: u32,
     /// Encoder in use once capture has started.
     pub(crate) encoder_id: Option<String>,
     /// Current assignments, keyed by viewer session.
@@ -64,8 +68,6 @@ pub(crate) struct Status {
 
 /// Commands and connection feedback serialized by the broadcast owner.
 pub(crate) enum Event {
-    /// Local preview signaling never traverses the server or consumes a slot.
-    Preview { id: String, action: PreviewAction },
     /// Incoming signal on the owning Mumble connection.
     Signal {
         sender: u32,
@@ -82,18 +84,13 @@ pub(crate) enum Event {
     KeyFrame,
 }
 
-pub(crate) enum PreviewAction {
-    Start(tauri::ipc::Channel<serde_json::Value>),
-    Answer(String),
-    Ice(String),
-    Stop,
-}
-
 /// Per-session handle. Dropping it always requests cleanup.
 pub(crate) struct Handle {
     pub(crate) events: mpsc::Sender<Event>,
     pub(crate) status: watch::Receiver<Status>,
     pub(crate) cancel: CancellationToken,
+    #[cfg(all(target_os = "windows", feature = "native-screenshare"))]
+    pub(crate) preview: Arc<Mutex<Option<crate::media::pipeline::PreviewHandle>>>,
 }
 
 impl Drop for Handle {
@@ -146,6 +143,7 @@ pub(crate) fn spawn(
         server_id: context.server_id.clone(),
         broadcast_id: uuid::Uuid::new_v4().to_string(),
         running: true,
+        fps: request.settings.fps,
         encoder_id: None,
         viewers: HashMap::new(),
         free_direct_slots: allocator.free_slots(),
@@ -157,7 +155,11 @@ pub(crate) fn spawn(
         events: events.clone(),
         status: status_rx,
         cancel: cancel.clone(),
+        #[cfg(all(target_os = "windows", feature = "native-screenshare"))]
+        preview: Arc::new(Mutex::new(None)),
     };
+    #[cfg(all(target_os = "windows", feature = "native-screenshare"))]
+    let preview = Arc::clone(&handle.preview);
     let _task = tokio::spawn(async move {
         let mut owner = Owner {
             context,
@@ -166,13 +168,14 @@ pub(crate) fn spawn(
             status,
             cancel,
             peers: HashMap::new(),
-            preview: None,
             members: HashSet::new(),
             next_peer: 0,
             key_requested: false,
             last_key: Instant::now() - Duration::from_secs(1),
             announced: false,
             audio: None,
+            #[cfg(all(target_os = "windows", feature = "native-screenshare"))]
+            preview_handle: preview,
         };
         let mut ready = Some(ready);
         let result = owner.start(request, rx, &mut ready).await;
@@ -199,13 +202,14 @@ struct Owner {
     status: watch::Sender<Status>,
     cancel: CancellationToken,
     peers: HashMap<u32, peer::Peer>,
-    preview: Option<(String, peer::Peer)>,
     members: HashSet<u32>,
     next_peer: u64,
     key_requested: bool,
     last_key: Instant,
     announced: bool,
     audio: Option<broadcast::Sender<Arc<super::audio::Packet>>>,
+    #[cfg(all(target_os = "windows", feature = "native-screenshare"))]
+    preview_handle: Arc<Mutex<Option<crate::media::pipeline::PreviewHandle>>>,
 }
 
 impl Owner {
@@ -233,6 +237,10 @@ impl Owner {
         .await
         .map_err(|e| format!("capture startup task failed: {e}"))?;
         let mut capture = capture?;
+        #[cfg(all(target_os = "windows", feature = "native-screenshare"))]
+        if let Ok(mut preview) = self.preview_handle.lock() {
+            *preview = capture.preview();
+        }
         let result = self.run_capture(capture.as_mut(), frames, rx, ready).await;
         // PipelineHandle::drop joins native threads and must not block Tokio.
         let _ = tokio::task::spawn_blocking(move || drop(capture)).await;
@@ -253,7 +261,10 @@ impl Owner {
         let codec = Codec::from_encoder(capture.encoder_id()).ok_or("unsupported video codec")?;
         let fps = capture.encoding().fps;
         self.status
-            .send_modify(|s| s.encoder_id = Some(capture.encoder_id().to_owned()));
+            .send_modify(|s| {
+                s.encoder_id = Some(capture.encoder_id().to_owned());
+                s.fps = fps;
+            });
         self.announce().await?;
         self.announced = true;
         if self.context.sfu_available {
@@ -300,7 +311,6 @@ impl Owner {
             fps,
             client: self.context.client.clone(),
             events: self.events.clone(),
-            preview: None,
         };
         let _ = self.peers.insert(
             target,
@@ -320,45 +330,6 @@ impl Owner {
         frames: &broadcast::Sender<Arc<frame::EncodedFrame>>,
     ) -> Result<(), String> {
         match event {
-            Event::Preview { id, action } => match action {
-                PreviewAction::Start(channel) => {
-                    self.stop_preview().await;
-                    self.next_peer += 1;
-                    let config = peer::Config {
-                        target: self.context.own_session,
-                        id: self.next_peer,
-                        codec,
-                        fps,
-                        client: self.context.client.clone(),
-                        events: self.events.clone(),
-                        preview: Some(channel),
-                    };
-                    self.preview = Some((id, peer::spawn(config, frames.subscribe(), None)));
-                }
-                PreviewAction::Stop => {
-                    if self
-                        .preview
-                        .as_ref()
-                        .is_some_and(|(current, _)| current == &id)
-                    {
-                        self.stop_preview().await;
-                    }
-                }
-                action => {
-                    if let Some((_, peer)) =
-                        self.preview.as_ref().filter(|(current, _)| current == &id)
-                    {
-                        let input = match action {
-                            PreviewAction::Answer(sdp) => peer::Input::Answer(sdp),
-                            PreviewAction::Ice(candidate) => peer::Input::Ice(candidate),
-                            _ => unreachable!(),
-                        };
-                        if peer.input.try_send(input).is_err() {
-                            peer.cancel.cancel();
-                        }
-                    }
-                }
-            },
             Event::KeyFrame => self.key_requested = true,
             Event::PeerEnded { target, id, error } => {
                 if self.peers.get(&target).is_none_or(|peer| peer.id != id) {
@@ -531,7 +502,10 @@ impl Owner {
     }
 
     async fn shutdown(&mut self) {
-        self.stop_preview().await;
+        #[cfg(all(target_os = "windows", feature = "native-screenshare"))]
+        if let Ok(mut preview) = self.preview_handle.lock() {
+            *preview = None;
+        }
         for peer in self.peers.values() {
             peer.cancel.cancel();
         }
@@ -558,12 +532,6 @@ impl Owner {
             .emit("native-screen-share-state", self.status.borrow().clone());
     }
 
-    async fn stop_preview(&mut self) {
-        if let Some((_, peer)) = self.preview.take() {
-            peer.cancel.cancel();
-            let _ = peer.task.await;
-        }
-    }
 }
 
 #[cfg(test)]

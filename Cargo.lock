@@ -3577,6 +3577,7 @@ dependencies = [
  "futures-util",
  "gtk",
  "hound",
+ "image",
  "mimalloc",
  "mumble-protocol",
  "objc2 0.5.2",

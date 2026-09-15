@@ -12,13 +12,13 @@ use super::{types::ConnectionStatus, AppState, SharedState};
 use crate::media::broadcast::{self, Context, Event, StartRequest, Status};
 
 impl AppState {
-    pub(crate) fn native_screen_share_preview(
+    #[cfg(all(target_os = "windows", feature = "native-screenshare"))]
+    pub(crate) fn native_screen_share_preview_frame(
         &self,
         server_id: &str,
         broadcast_id: &str,
-        id: String,
-        action: broadcast::PreviewAction,
-    ) -> Result<(), String> {
+        max_width: u32,
+    ) -> Result<Option<crate::media::pipeline::PreviewSnapshot>, String> {
         let session = self.screen_share_session(Some(server_id))?;
         let state = session.lock().map_err(|e| e.to_string())?;
         let handle = state
@@ -29,10 +29,13 @@ impl AppState {
         if !status.running || status.broadcast_id != broadcast_id {
             return Err("Screen share has ended or changed".to_owned());
         }
-        handle
-            .events
-            .try_send(Event::Preview { id, action })
-            .map_err(|e| format!("Preview signaling unavailable: {e}"))
+        let preview = handle
+            .preview
+            .lock()
+            .map_err(|e| e.to_string())?
+            .clone()
+            .ok_or("Native preview is not ready")?;
+        preview.snapshot(max_width)
     }
 
     fn screen_share_session(
