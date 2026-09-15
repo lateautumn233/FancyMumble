@@ -135,8 +135,8 @@ ffmpeg-sys-next = { version = "8.1", default-features = false, features = [
     "swresample",
     "static",
 ], optional = true }
-# DXGI adapter enumeration for the encoder-cache GPU signature. Already in
-# the tree via cpal; we only turn on the Direct3D/DXGI feature sets.
+# DXGI enumeration and WASAPI device/process loopback for native sharing.
+# Already in the tree via cpal; enable the additional Windows interfaces.
 windows = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Graphics_Dxgi",
@@ -145,6 +145,9 @@ windows = { version = "0.61", features = [
     # reports a DPI-scaled desktop rectangle rather than the panel's real
     # pixels, and the capture filters work in real pixels.
     "Win32_UI_HiDpi",
+    "Win32_Media_Audio",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Variant",
 ], optional = true }
 
 # macOS-only: NSWindow.setContentAspectRatio: for native aspect-ratio

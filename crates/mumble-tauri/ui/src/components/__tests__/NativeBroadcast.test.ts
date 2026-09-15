@@ -11,7 +11,7 @@ vi.mock("../chat/drawing/DrawingOverlay", () => ({ clearAllStrokesInChannel: vi.
 
 const context = { serverId: "a", ownSession: 1, channelId: 0 };
 const status: NativeStatus = { serverId: "a", broadcastId: "new", running: true, encoderId: "h264_nvenc", error: null };
-const request: NativeShareRequest = { source: { kind: "monitor", outputIndex: 0, hmonitor: "1" }, drawCursor: true,
+const request: NativeShareRequest = { source: { kind: "monitor", outputIndex: 0, hmonitor: "1" }, drawCursor: true, shareAudio: true,
   settings: { capture: "ddagrab", encoder: "auto", resolution: { mode: "native" }, fps: 30, bitrateKbps: null, p2p: "auto", p2pMaxViewers: 2 } };
 beforeEach(() => {
   vi.mocked(invoke).mockReset();

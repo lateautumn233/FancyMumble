@@ -68,7 +68,11 @@ impl PeerConnectionEventHandler for Handler {
 }
 
 /// Start one sender. A slow viewer never shares a queue or await with another.
-pub(super) fn spawn(config: Config, frames: broadcast::Receiver<Arc<EncodedFrame>>) -> Peer {
+pub(super) fn spawn(
+    config: Config,
+    frames: broadcast::Receiver<Arc<EncodedFrame>>,
+    audio: Option<broadcast::Receiver<Arc<crate::media::audio::Packet>>>,
+) -> Peer {
     let (input, rx) = mpsc::channel(64);
     let cancel = CancellationToken::new();
     let token = cancel.clone();
@@ -78,7 +82,7 @@ pub(super) fn spawn(config: Config, frames: broadcast::Receiver<Arc<EncodedFrame
         let create = async {
             let handler = Arc::new(Handler(local_tx));
             let runtime = Arc::new(webrtc::runtime::TokioRuntime);
-            if config.preview.is_some() {
+            let mut connection = if config.preview.is_some() {
                 Connection::with_ice_servers(
                     config.codec,
                     config.fps,
@@ -90,7 +94,14 @@ pub(super) fn spawn(config: Config, frames: broadcast::Receiver<Arc<EncodedFrame
                 .await
             } else {
                 Connection::new(config.codec, config.fps, handler, runtime).await
+            }?;
+            if audio.is_some() {
+                if let Err(error) = connection.enable_audio().await {
+                    connection.close().await;
+                    return Err(error);
+                }
             }
+            Ok::<_, String>(connection)
         };
         let result = tokio::select! {
             () = token.cancelled() => return,
@@ -100,7 +111,7 @@ pub(super) fn spawn(config: Config, frames: broadcast::Receiver<Arc<EncodedFrame
             Ok(Ok(mut connection)) => {
                 let result = tokio::select! {
                     () = token.cancelled() => Ok(()),
-                    result = run(&config, &mut connection, frames, rx, local_rx, &token) => result,
+                    result = run(&config, &mut connection, Media { video: frames, audio }, rx, local_rx, &token) => result,
                 };
                 connection.close().await;
                 result
@@ -130,10 +141,15 @@ pub(super) fn spawn(config: Config, frames: broadcast::Receiver<Arc<EncodedFrame
     }
 }
 
+struct Media {
+    video: broadcast::Receiver<Arc<EncodedFrame>>,
+    audio: Option<broadcast::Receiver<Arc<crate::media::audio::Packet>>>,
+}
+
 async fn run(
     config: &Config,
     connection: &mut Connection,
-    mut frames: broadcast::Receiver<Arc<EncodedFrame>>,
+    mut media: Media,
     mut input: mpsc::Receiver<Input>,
     mut local: mpsc::Receiver<Local>,
     cancel: &CancellationToken,
@@ -189,7 +205,18 @@ async fn run(
                     }) { config.key_frame(); }
                 } else { feedback_open = false; }
             }
-            frame = frames.recv() => match frame {
+            packet = async { match &mut media.audio {
+                Some(audio) => audio.recv().await,
+                None => std::future::pending().await,
+            } } => match packet {
+                Ok(packet) if connected && answered => {
+                    tokio::time::timeout(Duration::from_secs(3), connection.send_audio(&packet)).await
+                        .map_err(|_| "audio sender stalled".to_owned())??;
+                }
+                Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+                Err(broadcast::error::RecvError::Closed) => return Err("audio capture stopped".to_owned()),
+            },
+            frame = media.video.recv() => match frame {
                 Ok(frame) if connected && answered => {
                     if waiting_key && !frame.is_key { continue; }
                     waiting_key = false;

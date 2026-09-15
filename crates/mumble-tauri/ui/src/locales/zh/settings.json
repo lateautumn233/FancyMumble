@@ -17,6 +17,7 @@
     "advanced": "高级选项",
     "capture": "采集后端",
     "cursor": "显示鼠标指针",
+    "audio": "共享声音",
     "p2p": "启用直连（P2P）",
     "maxViewers": "P2P 观看人数上限",
     "source": "共享源",

@@ -33,6 +33,9 @@ pub(crate) struct StartRequest {
     /// Whether to include the pointer in captured frames.
     #[serde(default = "default_cursor")]
     pub(crate) draw_cursor: bool,
+    /// Capture endpoint audio for displays, or process audio for windows.
+    #[serde(default = "default_cursor")]
+    pub(crate) share_audio: bool,
 }
 
 const fn default_cursor() -> bool {
@@ -169,6 +172,7 @@ pub(crate) fn spawn(
             key_requested: false,
             last_key: Instant::now() - Duration::from_secs(1),
             announced: false,
+            audio: None,
         };
         let mut ready = Some(ready);
         let result = owner.start(request, rx, &mut ready).await;
@@ -201,6 +205,7 @@ struct Owner {
     key_requested: bool,
     last_key: Instant,
     announced: bool,
+    audio: Option<broadcast::Sender<Arc<super::audio::Packet>>>,
 }
 
 impl Owner {
@@ -212,6 +217,8 @@ impl Owner {
     ) -> Result<(), String> {
         let (frames, _) = broadcast::channel(8);
         let sink_tx = frames.clone();
+        self.audio = request.share_audio.then(|| broadcast::channel(5).0);
+        let audio = self.audio.clone();
         let data_dir = crate::e2e_data_dir(&self.context.app)?;
         let capture = tokio::task::spawn_blocking(move || {
             source::start(
@@ -220,6 +227,7 @@ impl Owner {
                 Box::new(move |frame| {
                     let _ = sink_tx.send(Arc::new(frame));
                 }),
+                audio,
             )
         })
         .await
@@ -294,9 +302,14 @@ impl Owner {
             events: self.events.clone(),
             preview: None,
         };
-        let _ = self
-            .peers
-            .insert(target, peer::spawn(config, frames.subscribe()));
+        let _ = self.peers.insert(
+            target,
+            peer::spawn(
+                config,
+                frames.subscribe(),
+                self.audio.as_ref().map(broadcast::Sender::subscribe),
+            ),
+        );
     }
 
     async fn event(
@@ -320,7 +333,7 @@ impl Owner {
                         events: self.events.clone(),
                         preview: Some(channel),
                     };
-                    self.preview = Some((id, peer::spawn(config, frames.subscribe())));
+                    self.preview = Some((id, peer::spawn(config, frames.subscribe(), None)));
                 }
                 PreviewAction::Stop => {
                     if self
@@ -332,16 +345,16 @@ impl Owner {
                     }
                 }
                 action => {
-                    if let Some((current, peer)) = &self.preview {
-                        if current == &id {
-                            let input = match action {
-                                PreviewAction::Answer(sdp) => peer::Input::Answer(sdp),
-                                PreviewAction::Ice(candidate) => peer::Input::Ice(candidate),
-                                _ => unreachable!(),
-                            };
-                            if peer.input.try_send(input).is_err() {
-                                peer.cancel.cancel();
-                            }
+                    if let Some((_, peer)) =
+                        self.preview.as_ref().filter(|(current, _)| current == &id)
+                    {
+                        let input = match action {
+                            PreviewAction::Answer(sdp) => peer::Input::Answer(sdp),
+                            PreviewAction::Ice(candidate) => peer::Input::Ice(candidate),
+                            _ => unreachable!(),
+                        };
+                        if peer.input.try_send(input).is_err() {
+                            peer.cancel.cancel();
                         }
                     }
                 }
@@ -550,5 +563,22 @@ impl Owner {
             peer.cancel.cancel();
             let _ = peer.task.await;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn audio_defaults_on_and_respects_explicit_disable() -> Result<(), serde_json::Error> {
+        let mut value = serde_json::json!({
+            "source": { "kind": "monitor", "outputIndex": 0, "hmonitor": "1" },
+            "settings": ScreenShareSettings::default(),
+        });
+        assert!(serde_json::from_value::<StartRequest>(value.clone())?.share_audio);
+        value["shareAudio"] = serde_json::json!(false);
+        assert!(!serde_json::from_value::<StartRequest>(value)?.share_audio);
+        Ok(())
     }
 }

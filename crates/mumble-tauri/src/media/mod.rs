@@ -22,10 +22,11 @@
 //! report [`encoder::EncoderReport::supported`] as `false`, so the frontend
 //! needs no platform branches.
 //!
-//! Video only, so far.  System audio still comes from the browser's
-//! `getDisplayMedia({audio: true})`; replacing it needs a WASAPI loopback
-//! capture (`cpal` is already a dependency) and somewhere to put the result,
-//! which is the transport stage's business.
+//! Optional Opus audio follows the capture source: render-endpoint loopback
+//! for displays, process-tree loopback for windows.
+
+#[cfg(not(target_os = "android"))]
+pub(crate) mod audio;
 
 #[cfg(not(target_os = "android"))]
 pub(crate) mod broadcast;

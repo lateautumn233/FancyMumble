@@ -7,7 +7,7 @@ import { loadSharePreferences, saveSharePreferences, type EncoderReport, type Sh
 import { registerSettings } from "./settingsSearchRegistry";
 import styles from "../../components/chat/stream/ScreenShareSetup.module.css";
 
-registerSettings("screen-share").add("screenShare.encoder").add("screenShare.resolution").add("screenShare.fps").add("screenShare.bitrate");
+registerSettings("screen-share").add("screenShare.encoder").add("screenShare.resolution").add("screenShare.fps").add("screenShare.bitrate").add("screenShare.audio");
 
 export function ScreenSharePanel() {
   const { t } = useTranslation("settings");

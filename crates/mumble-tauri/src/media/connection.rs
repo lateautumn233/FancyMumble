@@ -2,8 +2,7 @@
 //!
 //! The same shape serves both transports: the SFU and a direct viewer differ
 //! only in who is on the far end and which signal types carry the handshake.
-//! Both are the broadcaster offering a send-only video track, so both are this
-//! module.
+//! Both offer a send-only video track and optional stereo Opus audio.
 //!
 //! Frames arrive from the encode pipeline through [`Connection::send`] and are
 //! written as WebRTC samples.  A sample is a whole encoded frame; the RTP
@@ -35,6 +34,7 @@ use webrtc::rtp_transceiver::RtpSender;
 
 use super::frame::EncodedFrame;
 
+mod audio;
 mod feedback;
 
 /// Clock rate every WebRTC video codec uses, in Hz.
@@ -125,7 +125,7 @@ impl Codec {
     }
 }
 
-/// A send-only WebRTC connection carrying one encoded video stream.
+/// A send-only WebRTC connection carrying screen video and optional source audio.
 pub(crate) struct Connection {
     /// The peer connection itself.
     peer: Arc<dyn PeerConnection>,
@@ -145,6 +145,7 @@ pub(crate) struct Connection {
     frame_duration: Duration,
     /// Previous input timestamp, used to preserve gaps when frames are dropped.
     last_pts_ms: Option<i64>,
+    audio: Option<audio::Sender>,
 }
 
 impl Connection {
@@ -186,6 +187,9 @@ impl Connection {
         media_engine
             .register_codec(codec_parameters.clone(), RtpCodecKind::Video)
             .map_err(|e| format!("could not register {codec:?}: {e}"))?;
+        media_engine
+            .register_codec(audio::codec_parameters(), RtpCodecKind::Audio)
+            .map_err(|e| format!("could not register Opus: {e}"))?;
 
         let registry = register_default_interceptors(Registry::new(), &mut media_engine)
             .map_err(|e| format!("could not register interceptors: {e}"))?;
@@ -257,7 +261,22 @@ impl Connection {
             payload_type: None,
             frame_duration: Duration::from_secs(1) / fps.max(1),
             last_pts_ms: None,
+            audio: None,
         })
+    }
+
+    /// Add source audio before creating the offer. Local previews remain video-only.
+    pub(crate) async fn enable_audio(&mut self) -> Result<(), String> {
+        self.audio = Some(audio::Sender::new(self.peer.as_ref()).await?);
+        Ok(())
+    }
+
+    /// Send a timestamped Opus packet to this viewer.
+    pub(crate) async fn send_audio(&mut self, packet: &super::audio::Packet) -> Result<(), String> {
+        if let Some(audio) = &mut self.audio {
+            audio.send(packet).await?;
+        }
+        Ok(())
     }
 
     /// Create an offer and set it as the local description.
@@ -305,6 +324,9 @@ impl Connection {
                 "the far end negotiated no video codec".to_owned()
             })?;
         self.payload_type = Some(negotiated);
+        if let Some(audio) = &mut self.audio {
+            audio.negotiate().await?;
+        }
         Ok(())
     }
 
