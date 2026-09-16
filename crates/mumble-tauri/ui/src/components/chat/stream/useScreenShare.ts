@@ -1028,12 +1028,12 @@ export function useRemoteConnectionStats(session: number): ViewerConnectionStats
           } else {
             const current = readViewerStats(reports, previous);
             previous = current.samples;
-            publish({ route, rttMs: current.rttMs, bitrateKbps: current.bitrateKbps });
+            publish({ route, ...current });
           }
         } catch {
           previous = new Map();
           publish(viewerPcs.get(session) === viewer && useAppStore.getState().activeServerId === serverId
-            && pc.connectionState === "connected" ? { route, rttMs: null, bitrateKbps: null } : CONNECTING_STATS);
+            && pc.connectionState === "connected" ? { ...CONNECTING_STATS, route } : CONNECTING_STATS);
         }
       }
       if (!disposed) timer = setTimeout(() => { void sample(); }, 1000);

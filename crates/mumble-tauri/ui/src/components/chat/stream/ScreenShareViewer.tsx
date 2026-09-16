@@ -12,12 +12,39 @@ import DrawingOverlay from "../drawing/DrawingOverlay";
 import { useRef, useEffect, useMemo, useState, useCallback } from "react";
 import { Trans, useTranslation } from "react-i18next";
 import { invoke } from "@tauri-apps/api/core";
+import { Activity } from "lucide-react";
 import { useAppStore } from "../../../store";
 import { useRemoteConnectionStats, useRemoteStream } from "./useScreenShare";
 import { StreamConnectionStats } from "./StreamConnectionStats";
 import { useNativeBroadcast } from "./nativeBroadcast";
 import { NativePreview } from "./NativePreview";
+import { load } from "../../../utils/store";
+import { DEFAULT_VIEWER_STATS_PREFERENCES, loadViewerStatsPreferences } from "./nativeSettings";
 import styles from "./ScreenShareViewer.module.css";
+
+const VIEWER_VOLUME_KEY = "screenShareViewerVolume";
+
+async function loadViewerVolume(): Promise<number> {
+  try {
+    const store = await load("preferences.json", { autoSave: true, defaults: {} });
+    const saved = await store.get<unknown>(VIEWER_VOLUME_KEY);
+    return typeof saved === "number" && Number.isFinite(saved)
+      ? Math.max(0, Math.min(100, Math.round(saved)))
+      : 100;
+  } catch {
+    return 100;
+  }
+}
+
+async function saveViewerVolume(volume: number): Promise<void> {
+  try {
+    const store = await load("preferences.json", { autoSave: true, defaults: {} });
+    await store.set(VIEWER_VOLUME_KEY, volume);
+    await store.save();
+  } catch {
+    // Volume persistence is best effort and must not affect playback.
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Stream controls overlay
@@ -40,6 +67,9 @@ interface StreamControlsProps {
   /** When provided, renders a popout button that detaches the stream
    *  into a separate always-on-top window. */
   readonly onPopout?: () => void;
+  /** Toggle the complete viewer statistics overlay. */
+  readonly statsVisible?: boolean;
+  readonly onToggleStats?: () => void;
 }
 
 function VolumeControl({ muted, volume, onToggleMute, onChange }: {
@@ -78,16 +108,32 @@ function VolumeControl({ muted, volume, onToggleMute, onChange }: {
           aria-label={t("screenShare.volume")}
         />
       )}
+      <span className={styles.volumeValue} aria-live="polite">{muted ? 0 : volume}%</span>
     </div>
   );
 }
 
-function StreamControls({ videoRef, containerRef, isOwnPreview, drawChannelId, desktopOverlayOn, onToggleDesktopOverlay, onPopout }: StreamControlsProps) {
+function StreamControls({ videoRef, containerRef, isOwnPreview, drawChannelId, desktopOverlayOn, onToggleDesktopOverlay, onPopout, statsVisible, onToggleStats }: StreamControlsProps) {
   const [paused, setPaused] = useState(false);
   const [muted, setMuted] = useState(false);
   const [volume, setVolume] = useState(100);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const { t } = useTranslation(["chat", "common"]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void loadViewerVolume().then((savedVolume) => {
+      if (cancelled) return;
+      setVolume(savedVolume);
+      const video = videoRef.current;
+      if (video) {
+        video.volume = savedVolume / 100;
+        video.muted = savedVolume === 0;
+        setMuted(savedVolume === 0);
+      }
+    });
+    return () => { cancelled = true; };
+  }, [videoRef]);
 
   // Sync fullscreen state.
   useEffect(() => {
@@ -122,6 +168,7 @@ function StreamControls({ videoRef, containerRef, isOwnPreview, drawChannelId, d
     if (!video) return;
     const val = Number(e.target.value);
     setVolume(val);
+    void saveViewerVolume(val);
     video.volume = val / 100;
     if (val === 0) {
       video.muted = true;
@@ -208,6 +255,19 @@ function StreamControls({ videoRef, containerRef, isOwnPreview, drawChannelId, d
           aria-pressed={desktopOverlayOn}
         >
           <ScreenShareIcon width={16} height={16} />
+        </button>
+      )}
+
+      {onToggleStats && (
+        <button
+          type="button"
+          className={`${styles.controlBtn} ${statsVisible ? styles.controlBtnActive : ""}`}
+          onClick={onToggleStats}
+          title={t(statsVisible ? "screenShare.hideStats" : "screenShare.showStats")}
+          aria-label={t(statsVisible ? "screenShare.hideStats" : "screenShare.showStats")}
+          aria-pressed={statsVisible}
+        >
+          <Activity width={16} height={16} />
         </button>
       )}
 
@@ -349,7 +409,19 @@ function RemoteViewer({ session, channelId, ownSession }: { readonly session: nu
   const connectionStats = useRemoteConnectionStats(session);
   const broadcaster = useAppStore((s) => s.users.find((u) => u.session === session));
   const activeServerId = useAppStore((s) => s.activeServerId);
+  const [statsPreferences, setStatsPreferences] = useState(DEFAULT_VIEWER_STATS_PREFERENCES);
+  const [statsVisible, setStatsVisible] = useState(DEFAULT_VIEWER_STATS_PREFERENCES.enabled);
   const { t } = useTranslation(["chat", "common"]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void loadViewerStatsPreferences().then((preferences) => {
+      if (cancelled) return;
+      setStatsPreferences(preferences);
+      setStatsVisible(preferences.enabled);
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, []);
 
   const handlePopout = useCallback(() => {
     if (!ownSession || !activeServerId) return;
@@ -377,7 +449,7 @@ function RemoteViewer({ session, channelId, ownSession }: { readonly session: nu
 
   return (
     <div ref={containerRef} className={styles.streamViewport}>
-      <StreamConnectionStats stats={connectionStats} />
+      {statsVisible && <StreamConnectionStats stats={connectionStats} preferences={statsPreferences} />}
       {!remoteStream && (
         <div className={styles.streamPlaceholder}>
           <ScreenShareIcon className={styles.streamPlaceholderIcon} />
@@ -400,6 +472,8 @@ function RemoteViewer({ session, channelId, ownSession }: { readonly session: nu
           containerRef={containerRef}
           drawChannelId={channelId}
           onPopout={handlePopout}
+          statsVisible={statsVisible}
+          onToggleStats={() => setStatsVisible((visible) => !visible)}
         />
       )}
       <DrawingOverlay channelId={channelId} ownSession={ownSession} videoRef={videoRef} />

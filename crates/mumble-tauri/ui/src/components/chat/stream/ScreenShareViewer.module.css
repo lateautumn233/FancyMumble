@@ -6,9 +6,9 @@
   left: 8px;
   z-index: 6;
   display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px 12px;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
   max-width: calc(100% - 56px);
   padding: 5px 8px;
   border-radius: 4px;
@@ -18,7 +18,9 @@
   font-variant-numeric: tabular-nums;
   line-height: 18px;
 }
-.viewerStats > span { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
+.viewerStatsGroup { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; }
+.viewerStatsGroup + .viewerStatsGroup { padding-top: 3px; border-top: 1px solid rgba(255, 255, 255, 0.14); }
+.viewerStatsGroup > span { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
 .statsSpinner { animation: statsSpin 1s linear infinite; }
 @keyframes statsSpin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .statsSpinner { animation: none; } }
@@ -154,6 +156,14 @@
   height: 4px;
   accent-color: #fff;
   cursor: pointer;
+}
+
+.volumeValue {
+  min-width: 32px;
+  color: #fff;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
 }
 
 .controlsSpacer {

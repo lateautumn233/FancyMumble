@@ -9,7 +9,12 @@ const storage = vi.hoisted(() => ({ get: vi.fn(), set: vi.fn(), save: vi.fn() })
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 vi.mock("../../utils/store", () => ({ load: vi.fn(async () => storage) }));
 
-const defaults: SharePreferences = { settings: { capture: "ddagrab", encoder: "auto", resolution: { mode: "native" }, fps: 30, bitrateKbps: null, p2p: "auto", p2pMaxViewers: 2 }, drawCursor: true, shareAudio: true };
+const defaults: SharePreferences = {
+  settings: { capture: "ddagrab", encoder: "auto", resolution: { mode: "native" }, fps: 30, bitrateKbps: null, p2p: "auto", p2pMaxViewers: 2 },
+  drawCursor: true,
+  shareAudio: true,
+  viewerStats: { enabled: true, connection: true, video: true, network: true },
+};
 const context = { serverId: "server-a", ownSession: 1, channelId: 0 };
 const start = vi.fn().mockResolvedValue(undefined);
 const close = vi.fn();

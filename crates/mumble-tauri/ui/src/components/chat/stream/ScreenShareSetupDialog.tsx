@@ -106,7 +106,15 @@ export function ScreenShareSetupDialog({ context, onClose, onStart }: Props) {
     event.preventDefault();
     if (!value || !source || !resolved || contextChanged || busy) return;
     setBusy(true); setError("");
-    try { await onStart({ ...value, source: source.source }, context, source.name); onClose(); }
+    try {
+      await onStart({
+        settings: value.settings,
+        drawCursor: value.drawCursor,
+        shareAudio: value.shareAudio,
+        source: source.source,
+      }, context, source.name);
+      onClose();
+    }
     catch (e) { setError(String(e)); setBusy(false); }
   }
   const activeKind = value?.settings.capture === "ddagrab" ? "monitor" : kind;

@@ -40,7 +40,13 @@
     "starting": "Starting...",
     "unsupported": "Native capture is unavailable in this build. Browser capture remains active.",
     "running": "Sharing screen",
-    "previewUnavailable": "Local preview is not available yet."
+    "previewUnavailable": "Local preview is not available yet.",
+    "viewerStats": "Viewer statistics",
+    "viewerStatsHint": "Choose the diagnostics shown by default while watching a screen share. The control bar can hide them temporarily.",
+    "showViewerStats": "Show viewer statistics by default",
+    "statsConnection": "Connection route and latency",
+    "statsVideo": "Codec, decoder, and video",
+    "statsNetwork": "Bitrate, jitter, and packet loss"
   },
   "localization": {
     "title": "Language & Format",

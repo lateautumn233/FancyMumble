@@ -40,7 +40,13 @@
     "starting": "正在启动...",
     "unsupported": "当前构建不支持原生采集，仍使用浏览器采集。",
     "running": "正在共享屏幕",
-    "previewUnavailable": "本地预览暂不可用。"
+    "previewUnavailable": "本地预览暂不可用。",
+    "viewerStats": "观看端统计信息",
+    "viewerStatsHint": "设置观看屏幕共享时默认显示的诊断信息。观看时可通过控制栏按钮临时隐藏。",
+    "showViewerStats": "默认显示观看统计",
+    "statsConnection": "连接方式与延迟",
+    "statsVideo": "编码、解码与画面",
+    "statsNetwork": "码率、抖动与丢包"
   },
   "localization": {
     "title": "语言与格式",

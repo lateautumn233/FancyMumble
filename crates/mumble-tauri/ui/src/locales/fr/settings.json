@@ -40,7 +40,13 @@
     "starting": "Démarrage...",
     "unsupported": "La capture native n'est pas disponible dans cette version. La capture du navigateur reste active.",
     "running": "Partage d'écran en cours",
-    "previewUnavailable": "L'aperçu local n'est pas encore disponible."
+    "previewUnavailable": "L'aperçu local n'est pas encore disponible.",
+    "viewerStats": "Statistiques du spectateur",
+    "viewerStatsHint": "Choisissez les diagnostics affichés par défaut pendant un partage d'écran. La barre de contrôle permet de les masquer temporairement.",
+    "showViewerStats": "Afficher les statistiques par défaut",
+    "statsConnection": "Routage et latence",
+    "statsVideo": "Codec, décodeur et vidéo",
+    "statsNetwork": "Débit, gigue et perte de paquets"
   },
   "localization": {
     "title": "Langue & Format",

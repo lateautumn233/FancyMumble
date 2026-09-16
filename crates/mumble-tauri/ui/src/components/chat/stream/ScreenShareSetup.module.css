@@ -48,6 +48,7 @@
 .dialog button:disabled, .options select:disabled, .button:disabled { opacity: .5; cursor: not-allowed; }
 .panel { letter-spacing: 0; }
 .panel .heading { margin-bottom: 20px; }
+.panel .sectionHeading { margin-top: 28px; margin-bottom: 6px; }
 @media (max-width: 640px) {
   .layout { grid-template-columns: minmax(0, 1fr); gap: 20px; }
   .sources { height: 170px; }

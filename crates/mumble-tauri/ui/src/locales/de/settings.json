@@ -40,7 +40,13 @@
     "starting": "Wird gestartet...",
     "unsupported": "Native Aufnahme ist in dieser Version nicht verfügbar. Die Browseraufnahme bleibt aktiv.",
     "running": "Bildschirm wird freigegeben",
-    "previewUnavailable": "Lokale Vorschau ist noch nicht verfügbar."
+    "previewUnavailable": "Lokale Vorschau ist noch nicht verfügbar.",
+    "viewerStats": "Zuschauerstatistiken",
+    "viewerStatsHint": "Legt fest, welche Diagnosedaten beim Ansehen einer Bildschirmübertragung standardmäßig erscheinen. Über die Steuerleiste können sie vorübergehend ausgeblendet werden.",
+    "showViewerStats": "Zuschauerstatistiken standardmäßig anzeigen",
+    "statsConnection": "Verbindungsweg und Latenz",
+    "statsVideo": "Codec, Decoder und Video",
+    "statsNetwork": "Bitrate, Jitter und Paketverlust"
   },
   "localization": {
     "title": "Sprache & Format",
